@@ -113,6 +113,7 @@ model Inventory {
 model Sale {
   id                 Int                @id @default(autoincrement())
   saleNumber         String             @unique @map("sale_number") @db.VarChar(50)
+  clientRequestId    String?            @unique @map("client_request_id") @db.Uuid
   cashierId          Int                @map("cashier_id")
   customerName       String?            @map("customer_name") @db.VarChar(150)
   totalAmount        Decimal            @map("total_amount") @db.Decimal(12, 2)

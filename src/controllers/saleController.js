@@ -3,6 +3,7 @@ const prisma = require("../config/prisma");
 const HttpError = require("../utils/HttpError");
 const { moneyToCents, centsToMoney } = require("../utils/money");
 const { runSerializableTransaction } = require("../utils/transaction");
+const { normalizeClientRequestId } = require("../utils/clientRequestId");
 
 const PAYMENT_METHODS = new Set([
   "CASH",
@@ -43,8 +44,9 @@ function makeSaleNumber() {
 }
 
 function serializeSale(sale) {
+  const { clientRequestId, ...publicSale } = sale;
   return {
-    ...sale,
+    ...publicSale,
     items: sale.items.map((item) => ({
       ...item,
       remainingQuantity: item.quantity - item.releasedQuantity,
@@ -60,6 +62,11 @@ function validateSaleRequest(body) {
   const items = [];
   const payments = [];
   const productIds = new Set();
+  const clientRequestId = normalizeClientRequestId(body.clientRequestId);
+
+  if (clientRequestId === undefined) {
+    errors.push("The sale synchronization ID is invalid");
+  }
 
   if (customerName && customerName.length > 150) {
     errors.push("Customer name cannot exceed 150 characters");
@@ -148,7 +155,10 @@ function validateSaleRequest(body) {
     });
   }
 
-  return { data: { customerName, items, payments }, errors };
+  return {
+    data: { customerName, items, payments, clientRequestId: clientRequestId || null },
+    errors,
+  };
 }
 
 async function createSale(req, res) {
@@ -158,7 +168,25 @@ async function createSale(req, res) {
     return res.status(400).json({ success: false, message: errors[0], errors });
   }
 
-  const sale = await runSerializableTransaction(async (transaction) => {
+  let result;
+
+  try {
+    result = await runSerializableTransaction(async (transaction) => {
+      if (data.clientRequestId) {
+        const existingSale = await transaction.sale.findUnique({
+          where: { clientRequestId: data.clientRequestId },
+          include: saleInclude,
+        });
+
+        if (existingSale) {
+          if (existingSale.cashierId !== req.user.id) {
+            throw new HttpError(409, "This sale synchronization ID is already in use");
+          }
+
+          return { sale: existingSale, repeated: true };
+        }
+      }
+
     const products = await transaction.product.findMany({
       where: { id: { in: data.items.map((item) => item.productId) } },
       include: { inventory: true },
@@ -212,6 +240,7 @@ async function createSale(req, res) {
     const createdSale = await transaction.sale.create({
       data: {
         saleNumber: makeSaleNumber(),
+        clientRequestId: data.clientRequestId,
         cashierId: req.user.id,
         customerName: data.customerName,
         totalAmount: centsToMoney(totalCents),
@@ -264,16 +293,36 @@ async function createSale(req, res) {
       },
     });
 
-    return transaction.sale.findUnique({
+    const sale = await transaction.sale.findUnique({
       where: { id: createdSale.id },
       include: saleInclude,
     });
-  });
 
-  return res.status(201).json({
+      return { sale, repeated: false };
+    });
+  } catch (error) {
+    if (data.clientRequestId && error.code === "P2002") {
+      const existingSale = await prisma.sale.findUnique({
+        where: { clientRequestId: data.clientRequestId },
+        include: saleInclude,
+      });
+
+      if (existingSale && existingSale.cashierId === req.user.id) {
+        result = { sale: existingSale, repeated: true };
+      } else {
+        throw error;
+      }
+    } else {
+      throw error;
+    }
+  }
+
+  return res.status(result.repeated ? 200 : 201).json({
     success: true,
-    message: "Sale recorded and reserved for inventory release",
-    data: { sale: serializeSale(sale) },
+    message: result.repeated
+      ? "Sale was already synchronized"
+      : "Sale recorded and reserved for inventory release",
+    data: { sale: serializeSale(result.sale), repeated: result.repeated },
   });
 }
 

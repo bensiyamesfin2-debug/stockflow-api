@@ -10,6 +10,7 @@ const {
   getPairingState,
   hashPairingToken,
 } = require("../src/utils/loginPairing");
+const { normalizeClientRequestId } = require("../src/utils/clientRequestId");
 
 test("encrypted backups round-trip and reject an incorrect password", () => {
   const source = { products: [{ id: 1, name: "Rice" }], sales: [1, 2] };
@@ -74,4 +75,13 @@ test("phone pairing credentials are high-entropy, hashed, short-lived, and singl
     getPairingState({ usedAt: now, expiresAt: credential.expiresAt }, now),
     "USED"
   );
+});
+
+test("offline sale synchronization accepts canonical UUIDs and rejects unsafe IDs", () => {
+  assert.equal(
+    normalizeClientRequestId("4D4EBE5A-45A7-4C17-AFC1-36A1DBE6DBA1"),
+    "4d4ebe5a-45a7-4c17-afc1-36a1dbe6dba1"
+  );
+  assert.equal(normalizeClientRequestId(undefined), null);
+  assert.equal(normalizeClientRequestId("sale-123"), undefined);
 });
