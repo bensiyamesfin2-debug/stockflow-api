@@ -1,7 +1,11 @@
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const prisma = require("../config/prisma");
-const { validateNewUser } = require("./userController");
+const { validateNewUser, validatePassword } = require("./userController");
+
+const MAX_FAILED_LOGIN_ATTEMPTS = 5;
+const ACCOUNT_LOCK_MINUTES = 15;
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync("stockflow-invalid-password", 12);
 
 function setupOrigins() {
   return new Set(
@@ -112,11 +116,62 @@ async function login(req, res) {
   }
 
   const user = await prisma.user.findUnique({ where: { username } });
-  const passwordIsValid = user
-    ? await bcrypt.compare(password, user.passwordHash)
-    : false;
+  const now = new Date();
+
+  if (user?.lockedUntil && user.lockedUntil > now) {
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil((user.lockedUntil.getTime() - now.getTime()) / 1000)
+    );
+    res.setHeader("Retry-After", String(retryAfterSeconds));
+    return res.status(429).json({
+      success: false,
+      message: "Too many failed attempts. Try again in a few minutes.",
+    });
+  }
+
+  const passwordIsValid = await bcrypt.compare(
+    password,
+    user?.passwordHash || DUMMY_PASSWORD_HASH
+  );
 
   if (!user || !passwordIsValid) {
+    if (user) {
+      const previousAttempts =
+        user.lockedUntil && user.lockedUntil <= now
+          ? 0
+          : user.failedLoginAttempts;
+      const failedLoginAttempts = previousAttempts + 1;
+      const shouldLock = failedLoginAttempts >= MAX_FAILED_LOGIN_ATTEMPTS;
+      const lockedUntil = shouldLock
+        ? new Date(now.getTime() + ACCOUNT_LOCK_MINUTES * 60 * 1000)
+        : null;
+
+      await prisma.$transaction([
+        prisma.user.update({
+          where: { id: user.id },
+          data: { failedLoginAttempts, lockedUntil },
+        }),
+        prisma.auditLog.create({
+          data: {
+            userId: user.id,
+            action: shouldLock ? "ACCOUNT_LOCKED" : "LOGIN_FAILED",
+            entityType: "USER",
+            entityId: user.id,
+            details: { failedLoginAttempts },
+          },
+        }),
+      ]);
+
+      if (shouldLock) {
+        res.setHeader("Retry-After", String(ACCOUNT_LOCK_MINUTES * 60));
+        return res.status(429).json({
+          success: false,
+          message: "Too many failed attempts. Try again in 15 minutes.",
+        });
+      }
+    }
+
     return res.status(401).json({
       success: false,
       message: "Invalid username or password",
@@ -130,23 +185,34 @@ async function login(req, res) {
     });
   }
 
+  const authenticatedAt = new Date();
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id: user.id },
+      data: {
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+        lastLoginAt: authenticatedAt,
+      },
+    }),
+    prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        action: "LOGIN",
+        entityType: "USER",
+        entityId: user.id,
+      },
+    }),
+  ]);
+
   const token = jwt.sign(
-    { role: user.role },
+    { role: user.role, tokenVersion: user.tokenVersion },
     process.env.JWT_SECRET,
     {
       subject: String(user.id),
       expiresIn: process.env.JWT_EXPIRES_IN || "8h",
     }
   );
-
-  await prisma.auditLog.create({
-    data: {
-      userId: user.id,
-      action: "LOGIN",
-      entityType: "USER",
-      entityId: user.id,
-    },
-  });
 
   return res.json({
     success: true,
@@ -163,6 +229,70 @@ async function login(req, res) {
   });
 }
 
+async function changePassword(req, res) {
+  const currentPassword = String(req.body.currentPassword || "");
+  const newPassword = String(req.body.newPassword || "");
+
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({
+      success: false,
+      message: "Current password and new password are required",
+    });
+  }
+
+  const passwordError = validatePassword(newPassword, req.user.username);
+  if (passwordError) {
+    return res.status(400).json({ success: false, message: passwordError });
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+  const currentPasswordIsValid = await bcrypt.compare(
+    currentPassword,
+    user.passwordHash
+  );
+
+  if (!currentPasswordIsValid) {
+    return res.status(401).json({
+      success: false,
+      message: "Current password is incorrect",
+    });
+  }
+
+  if (await bcrypt.compare(newPassword, user.passwordHash)) {
+    return res.status(400).json({
+      success: false,
+      message: "Choose a password you have not already been using",
+    });
+  }
+
+  const passwordHash = await bcrypt.hash(newPassword, 12);
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id: user.id },
+      data: {
+        passwordHash,
+        passwordChangedAt: new Date(),
+        tokenVersion: { increment: 1 },
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+      },
+    }),
+    prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        action: "CHANGE_PASSWORD",
+        entityType: "USER",
+        entityId: user.id,
+      },
+    }),
+  ]);
+
+  return res.json({
+    success: true,
+    message: "Password changed. Sign in again with your new password.",
+  });
+}
+
 function getCurrentUser(req, res) {
   return res.json({
     success: true,
@@ -175,4 +305,5 @@ module.exports = {
   getCurrentUser,
   getSetupStatus,
   initializeAdmin,
+  changePassword,
 };

@@ -1,6 +1,7 @@
 const prisma = require("../config/prisma");
 const HttpError = require("../utils/HttpError");
 const { moneyToCents, centsToMoney } = require("../utils/money");
+const { buildLowStockAlerts } = require("../utils/lowStock");
 
 function todayStart() {
   const date = new Date();
@@ -90,21 +91,7 @@ async function adminDashboard() {
     }),
   ]);
 
-  const lowStock = inventory
-    .filter(
-      (record) =>
-        record.product.isActive &&
-        record.quantity - record.reservedQuantity <= record.reorderLevel
-    )
-    .map((record) => ({
-      productId: record.productId,
-      sku: record.product.sku,
-      name: record.product.name,
-      physicalQuantity: record.quantity,
-      reservedQuantity: record.reservedQuantity,
-      availableQuantity: record.quantity - record.reservedQuantity,
-      reorderLevel: record.reorderLevel,
-    }));
+  const lowStock = buildLowStockAlerts(inventory);
 
   const inventoryValue = inventory.reduce((total, record) => {
     if (!record.product.costPrice) return total;
@@ -203,11 +190,7 @@ async function inventoryDashboard() {
       orderBy: { createdAt: "desc" },
     }),
   ]);
-  const lowStock = inventory.filter(
-    (record) =>
-      record.product.isActive &&
-      record.quantity - record.reservedQuantity <= record.reorderLevel
-  );
+  const lowStock = buildLowStockAlerts(inventory);
   const pendingUnits = pendingSales.reduce(
     (total, sale) =>
       total +
@@ -363,8 +346,176 @@ async function getPaymentReport(req, res) {
   });
 }
 
+function percentage(numerator, denominator) {
+  if (denominator === 0n) return 0;
+  return Number((numerator * 10_000n) / denominator) / 100;
+}
+
+function createProfitBucket(identity = {}) {
+  return {
+    ...identity,
+    units: 0,
+    missingCostUnits: 0,
+    revenueCents: 0n,
+    costedRevenueCents: 0n,
+    costOfGoodsCents: 0n,
+  };
+}
+
+function addProfitLine(bucket, item) {
+  const quantity = BigInt(item.quantity);
+  const revenueCents = moneyToCents(item.unitPrice.toFixed(2)) * quantity;
+  bucket.units += item.quantity;
+  bucket.revenueCents += revenueCents;
+
+  if (item.costPriceAtSale === null) {
+    bucket.missingCostUnits += item.quantity;
+    return;
+  }
+
+  bucket.costedRevenueCents += revenueCents;
+  bucket.costOfGoodsCents +=
+    moneyToCents(item.costPriceAtSale.toFixed(2)) * quantity;
+}
+
+function serializeProfitBucket(bucket) {
+  const grossProfitCents =
+    bucket.costedRevenueCents - bucket.costOfGoodsCents;
+
+  return {
+    ...Object.fromEntries(
+      Object.entries(bucket).filter(
+        ([key]) =>
+          ![
+            "revenueCents",
+            "costedRevenueCents",
+            "costOfGoodsCents",
+          ].includes(key)
+      )
+    ),
+    revenue: centsToMoney(bucket.revenueCents),
+    trackedRevenue: centsToMoney(bucket.costedRevenueCents),
+    costOfGoods: centsToMoney(bucket.costOfGoodsCents),
+    grossProfit: centsToMoney(grossProfitCents),
+    grossMarginPercent: percentage(
+      grossProfitCents,
+      bucket.costedRevenueCents
+    ),
+    costCoveragePercent: percentage(
+      bucket.costedRevenueCents,
+      bucket.revenueCents
+    ),
+  };
+}
+
+async function getProfitReport(req, res) {
+  const { from, to } = parseDateRange(req.query);
+  const items = await prisma.saleItem.findMany({
+    where: {
+      sale: {
+        createdAt: { gte: from, lte: to },
+        status: { not: "CANCELLED" },
+      },
+    },
+    take: 5000,
+    include: {
+      product: { select: { id: true, sku: true, name: true } },
+      sale: {
+        select: {
+          createdAt: true,
+          cashier: { select: { id: true, fullName: true } },
+        },
+      },
+    },
+    orderBy: { id: "desc" },
+  });
+
+  const totals = createProfitBucket();
+  const productBuckets = new Map();
+  const cashierBuckets = new Map();
+  const dailyBuckets = new Map();
+
+  for (const item of items) {
+    addProfitLine(totals, item);
+
+    if (!productBuckets.has(item.productId)) {
+      productBuckets.set(
+        item.productId,
+        createProfitBucket({
+          productId: item.productId,
+          sku: item.product.sku,
+          name: item.product.name,
+        })
+      );
+    }
+    addProfitLine(productBuckets.get(item.productId), item);
+
+    const cashierId = item.sale.cashier.id;
+    if (!cashierBuckets.has(cashierId)) {
+      cashierBuckets.set(
+        cashierId,
+        createProfitBucket({
+          cashierId,
+          fullName: item.sale.cashier.fullName,
+        })
+      );
+    }
+    addProfitLine(cashierBuckets.get(cashierId), item);
+
+    const date = dayKey(item.sale.createdAt);
+    if (!dailyBuckets.has(date)) {
+      dailyBuckets.set(date, createProfitBucket({ date }));
+    }
+    addProfitLine(dailyBuckets.get(date), item);
+  }
+
+  const byProduct = [...productBuckets.values()]
+    .map(serializeProfitBucket)
+    .sort((left, right) => Number(right.grossProfit) - Number(left.grossProfit));
+  const byCashier = [...cashierBuckets.values()]
+    .map(serializeProfitBucket)
+    .sort((left, right) => Number(right.grossProfit) - Number(left.grossProfit));
+  const trend = [...dailyBuckets.values()]
+    .map(serializeProfitBucket)
+    .sort((left, right) => left.date.localeCompare(right.date));
+
+  return res.json({
+    success: true,
+    data: {
+      range: { from, to },
+      totals: serializeProfitBucket(totals),
+      byProduct,
+      byCashier,
+      trend,
+    },
+  });
+}
+
+async function getLowStockAlerts(req, res) {
+  const inventory = await prisma.inventory.findMany({
+    include: {
+      product: {
+        select: { id: true, sku: true, name: true, isActive: true },
+      },
+    },
+  });
+  const alerts = buildLowStockAlerts(inventory);
+  const summary = alerts.reduce(
+    (counts, alert) => {
+      counts.total += 1;
+      counts[alert.severity] += 1;
+      return counts;
+    },
+    { total: 0, OUT_OF_STOCK: 0, CRITICAL: 0, LOW: 0 }
+  );
+
+  return res.json({ success: true, data: { alerts, summary } });
+}
+
 module.exports = {
   getDashboard,
   getSalesReport,
   getPaymentReport,
+  getProfitReport,
+  getLowStockAlerts,
 };

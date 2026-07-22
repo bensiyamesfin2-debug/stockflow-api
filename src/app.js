@@ -8,6 +8,7 @@ const productRoutes = require("./routes/productRoutes");
 const releaseRoutes = require("./routes/releaseRoutes");
 const reportRoutes = require("./routes/reportRoutes");
 const saleRoutes = require("./routes/saleRoutes");
+const securityRoutes = require("./routes/securityRoutes");
 const testRoutes = require("./routes/testRoutes");
 const userRoutes = require("./routes/userRoutes");
 const { authenticate, authorizeRoles } = require("./middleware/auth");
@@ -36,6 +37,13 @@ app.use((req, res, next) => {
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  res.setHeader("Cache-Control", "no-store");
+  if (process.env.NODE_ENV === "production") {
+    res.setHeader(
+      "Strict-Transport-Security",
+      "max-age=31536000; includeSubDomains"
+    );
+  }
   next();
 });
 
@@ -83,6 +91,7 @@ app.use("/api/products", productRoutes);
 app.use("/api/releases", releaseRoutes);
 app.use("/api/reports", reportRoutes);
 app.use("/api/sales", saleRoutes);
+app.use("/api/security", securityRoutes);
 app.use("/api/inventory", inventoryRoutes);
 app.use("/api/users", userRoutes);
 app.use(

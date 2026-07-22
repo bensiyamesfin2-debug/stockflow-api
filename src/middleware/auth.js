@@ -29,17 +29,23 @@ async function authenticate(req, res, next) {
         username: true,
         role: true,
         isActive: true,
+        tokenVersion: true,
       },
     });
 
-    if (!user || !user.isActive) {
+    if (
+      !user ||
+      !user.isActive ||
+      payload.tokenVersion !== user.tokenVersion
+    ) {
       return res.status(401).json({
         success: false,
         message: "Account is unavailable",
       });
     }
 
-    req.user = user;
+    const { tokenVersion, ...authenticatedUser } = user;
+    req.user = authenticatedUser;
     return next();
   } catch (error) {
     if (error.name !== "JsonWebTokenError" && error.name !== "TokenExpiredError") {

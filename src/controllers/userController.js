@@ -4,6 +4,18 @@ const prisma = require("../config/prisma");
 const ALLOWED_ROLES = new Set(["ADMIN", "CASHIER", "INVENTORY_STAFF"]);
 const USERNAME_PATTERN = /^[a-z0-9._-]{3,50}$/;
 
+function validatePassword(password, username = "") {
+  if (password.length < 10 || password.length > 128) {
+    return "Password must be between 10 and 128 characters";
+  }
+
+  if (username && password.toLowerCase().includes(username.toLowerCase())) {
+    return "Password must not contain the username";
+  }
+
+  return null;
+}
+
 function validateNewUser({ fullName, username, password, role }) {
   if (fullName.length < 2 || fullName.length > 150) {
     return "Full name must be between 2 and 150 characters";
@@ -13,9 +25,8 @@ function validateNewUser({ fullName, username, password, role }) {
     return "Username must be 3-50 characters and use only letters, numbers, dots, underscores, or hyphens";
   }
 
-  if (password.length < 8 || password.length > 128) {
-    return "Password must be between 8 and 128 characters";
-  }
+  const passwordError = validatePassword(password, username);
+  if (passwordError) return passwordError;
 
   if (!ALLOWED_ROLES.has(role)) {
     return "Role must be ADMIN, CASHIER, or INVENTORY_STAFF";
@@ -182,4 +193,5 @@ module.exports = {
   listUsers,
   updateUserStatus,
   validateNewUser,
+  validatePassword,
 };
