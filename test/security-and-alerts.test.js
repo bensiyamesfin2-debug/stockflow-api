@@ -5,6 +5,11 @@ const {
   decryptJsonBackup,
 } = require("../src/utils/backupEncryption");
 const { buildLowStockAlerts } = require("../src/utils/lowStock");
+const {
+  createPairingCredential,
+  getPairingState,
+  hashPairingToken,
+} = require("../src/utils/loginPairing");
 
 test("encrypted backups round-trip and reject an incorrect password", () => {
   const source = { products: [{ id: 1, name: "Rice" }], sales: [1, 2] };
@@ -48,4 +53,25 @@ test("low-stock alerts prioritize out-of-stock and critical products", () => {
     ["OUT_OF_STOCK", "CRITICAL"]
   );
   assert.equal(alerts[0].suggestedOrderQuantity, 10);
+});
+
+test("phone pairing credentials are high-entropy, hashed, short-lived, and single-state", () => {
+  const now = new Date("2026-07-22T09:00:00.000Z");
+  const credential = createPairingCredential(now);
+
+  assert.match(credential.token, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(credential.tokenHash, hashPairingToken(credential.token));
+  assert.notEqual(credential.tokenHash, credential.token);
+  assert.equal(
+    getPairingState({ usedAt: null, expiresAt: credential.expiresAt }, now),
+    "PENDING"
+  );
+  assert.equal(
+    getPairingState({ usedAt: null, expiresAt: credential.expiresAt }, credential.expiresAt),
+    "EXPIRED"
+  );
+  assert.equal(
+    getPairingState({ usedAt: now, expiresAt: credential.expiresAt }, now),
+    "USED"
+  );
 });

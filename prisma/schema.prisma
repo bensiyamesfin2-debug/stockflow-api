@@ -61,8 +61,23 @@ model User {
   stockReceipts       StockReceipt[]      @relation("ReceivedBy")
   inventoryMovements  InventoryMovement[] @relation("MovementCreatedBy")
   auditLogs           AuditLog[]          @relation("UserAuditLogs")
+  loginPairings       LoginPairing[]
 
   @@map("users")
+}
+
+model LoginPairing {
+  id        String    @id @default(uuid()) @db.Uuid
+  tokenHash String    @unique @map("token_hash") @db.VarChar(64)
+  userId    Int       @map("user_id")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(3)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([expiresAt])
+  @@map("login_pairings")
 }
 
 model Product {

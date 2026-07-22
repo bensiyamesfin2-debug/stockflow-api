@@ -2,6 +2,11 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const prisma = require("../config/prisma");
 const { validateNewUser, validatePassword } = require("./userController");
+const {
+  createPairingCredential,
+  getPairingState,
+  hashPairingToken,
+} = require("../utils/loginPairing");
 
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const ACCOUNT_LOCK_MINUTES = 15;
@@ -14,6 +19,27 @@ function setupOrigins() {
       .map((origin) => origin.trim().replace(/\/$/, ""))
       .filter(Boolean)
   );
+}
+
+function issueSession(user) {
+  const token = jwt.sign(
+    { role: user.role, tokenVersion: user.tokenVersion },
+    process.env.JWT_SECRET,
+    {
+      subject: String(user.id),
+      expiresIn: process.env.JWT_EXPIRES_IN || "8h",
+    }
+  );
+
+  return {
+    token,
+    user: {
+      id: user.id,
+      fullName: user.fullName,
+      username: user.username,
+      role: user.role,
+    },
+  };
 }
 
 async function getSetupStatus(req, res) {
@@ -205,25 +231,182 @@ async function login(req, res) {
     }),
   ]);
 
-  const token = jwt.sign(
-    { role: user.role, tokenVersion: user.tokenVersion },
-    process.env.JWT_SECRET,
-    {
-      subject: String(user.id),
-      expiresIn: process.env.JWT_EXPIRES_IN || "8h",
-    }
-  );
-
   return res.json({
     success: true,
     message: "Login successful",
+    data: issueSession(user),
+  });
+}
+
+async function createLoginPairing(req, res) {
+  const password = String(req.body.password || "");
+
+  if (!password) {
+    return res.status(400).json({
+      success: false,
+      message: "Enter your password before connecting another device",
+    });
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+  const passwordIsValid = await bcrypt.compare(password, user.passwordHash);
+
+  if (!passwordIsValid) {
+    await prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        action: "PAIRING_REAUTH_FAILED",
+        entityType: "USER",
+        entityId: user.id,
+      },
+    });
+    return res.status(401).json({
+      success: false,
+      message: "Password is incorrect",
+    });
+  }
+
+  const credential = createPairingCredential();
+  const pairing = await prisma.$transaction(async (transaction) => {
+    await transaction.loginPairing.deleteMany({
+      where: {
+        OR: [
+          { userId: user.id },
+          { expiresAt: { lte: new Date() } },
+        ],
+      },
+    });
+
+    const created = await transaction.loginPairing.create({
+      data: {
+        tokenHash: credential.tokenHash,
+        userId: user.id,
+        expiresAt: credential.expiresAt,
+      },
+    });
+
+    await transaction.auditLog.create({
+      data: {
+        userId: user.id,
+        action: "CREATE_LOGIN_PAIRING",
+        entityType: "USER",
+        entityId: user.id,
+        details: { pairingId: created.id, expiresAt: created.expiresAt },
+      },
+    });
+
+    return created;
+  });
+
+  return res.status(201).json({
+    success: true,
+    message: "Secure phone QR created",
     data: {
-      token,
-      user: {
-        id: user.id,
-        fullName: user.fullName,
-        username: user.username,
-        role: user.role,
+      pairingId: pairing.id,
+      pairingToken: credential.token,
+      expiresAt: pairing.expiresAt,
+    },
+  });
+}
+
+async function exchangeLoginPairing(req, res) {
+  const pairingToken = String(req.body.pairingToken || "");
+
+  if (pairingToken.length < 40 || pairingToken.length > 100) {
+    return res.status(400).json({
+      success: false,
+      message: "This phone sign-in link is invalid or has expired",
+    });
+  }
+
+  const tokenHash = hashPairingToken(pairingToken);
+  const authenticatedAt = new Date();
+  const user = await prisma.$transaction(async (transaction) => {
+    const pairing = await transaction.loginPairing.findUnique({
+      where: { tokenHash },
+      include: { user: true },
+    });
+
+    if (
+      !pairing ||
+      pairing.usedAt ||
+      pairing.expiresAt <= authenticatedAt ||
+      !pairing.user.isActive
+    ) {
+      return null;
+    }
+
+    const claim = await transaction.loginPairing.updateMany({
+      where: {
+        id: pairing.id,
+        usedAt: null,
+        expiresAt: { gt: authenticatedAt },
+      },
+      data: { usedAt: authenticatedAt },
+    });
+
+    if (claim.count !== 1) return null;
+
+    const updatedUser = await transaction.user.update({
+      where: { id: pairing.userId },
+      data: { lastLoginAt: authenticatedAt },
+    });
+
+    await transaction.auditLog.create({
+      data: {
+        userId: pairing.userId,
+        action: "PAIRING_LOGIN",
+        entityType: "USER",
+        entityId: pairing.userId,
+        details: { pairingId: pairing.id },
+      },
+    });
+
+    return updatedUser;
+  });
+
+  if (!user) {
+    return res.status(400).json({
+      success: false,
+      message: "This phone sign-in link is invalid, expired, or already used",
+    });
+  }
+
+  return res.json({
+    success: true,
+    message: "Phone connected successfully",
+    data: issueSession(user),
+  });
+}
+
+async function getLoginPairingStatus(req, res) {
+  const pairingId = String(req.params.id || "");
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+  if (!uuidPattern.test(pairingId)) {
+    return res.status(400).json({ success: false, message: "Invalid pairing ID" });
+  }
+
+  const pairing = await prisma.loginPairing.findFirst({
+    where: { id: pairingId, userId: req.user.id },
+    select: { id: true, expiresAt: true, usedAt: true },
+  });
+
+  if (!pairing) {
+    return res.status(404).json({
+      success: false,
+      message: "Phone pairing request not found",
+    });
+  }
+
+  return res.json({
+    success: true,
+    data: {
+      pairing: {
+        id: pairing.id,
+        state: getPairingState(pairing),
+        expiresAt: pairing.expiresAt,
+        usedAt: pairing.usedAt,
       },
     },
   });
@@ -306,4 +489,7 @@ module.exports = {
   getSetupStatus,
   initializeAdmin,
   changePassword,
+  createLoginPairing,
+  exchangeLoginPairing,
+  getLoginPairingStatus,
 };
