@@ -5,3 +5,8 @@ node_modules/
 .env.*
 !.env.example
 npm-debug.log*
+.agents/
+.claude/
+.windsurf/
+work/
+skills-lock.json
