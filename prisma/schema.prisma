@@ -84,6 +84,9 @@ model Product {
   id                 Int                 @id @default(autoincrement())
   sku                String              @unique @db.VarChar(100)
   name               String              @db.VarChar(200)
+  length             Int?
+  width              Int?
+  thickness          Int?
   description        String?
   sellingPrice       Decimal             @map("selling_price") @db.Decimal(12, 2)
   costPrice          Decimal?            @map("cost_price") @db.Decimal(12, 2)

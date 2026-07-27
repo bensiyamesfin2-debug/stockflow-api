@@ -24,7 +24,16 @@ const saleInclude = {
   },
   items: {
     include: {
-      product: { select: { id: true, sku: true, name: true } },
+      product: {
+        select: {
+          id: true,
+          sku: true,
+          name: true,
+          length: true,
+          width: true,
+          thickness: true,
+        },
+      },
     },
   },
   payments: true,
@@ -326,6 +335,190 @@ async function createSale(req, res) {
   });
 }
 
+async function updateSale(req, res) {
+  const saleId = Number(req.params.id);
+
+  if (!Number.isInteger(saleId) || saleId <= 0) {
+    return res.status(400).json({ success: false, message: "Invalid sale ID" });
+  }
+
+  const { data, errors } = validateSaleRequest({
+    ...req.body,
+    clientRequestId: null,
+  });
+
+  if (errors.length > 0) {
+    return res.status(400).json({ success: false, message: errors[0], errors });
+  }
+
+  const sale = await runSerializableTransaction(async (transaction) => {
+    const existingSale = await transaction.sale.findUnique({
+      where: { id: saleId },
+      include: { items: true },
+    });
+
+    if (!existingSale) {
+      throw new HttpError(404, "Sale not found");
+    }
+
+    if (
+      req.user.role === "CASHIER" &&
+      existingSale.cashierId !== req.user.id
+    ) {
+      throw new HttpError(403, "You can only edit your own orders");
+    }
+
+    if (
+      existingSale.status !== "PENDING_RELEASE" ||
+      existingSale.items.some((item) => item.releasedQuantity > 0)
+    ) {
+      throw new HttpError(
+        409,
+        "An order can only be edited before inventory releases any items"
+      );
+    }
+
+    const products = await transaction.product.findMany({
+      where: { id: { in: data.items.map((item) => item.productId) } },
+      include: { inventory: true },
+    });
+
+    if (products.length !== data.items.length) {
+      throw new HttpError(400, "One or more products do not exist");
+    }
+
+    const productsById = new Map(
+      products.map((product) => [product.id, product])
+    );
+    const currentQuantityByProduct = new Map(
+      existingSale.items.map((item) => [item.productId, item.quantity])
+    );
+    let totalCents = 0n;
+
+    for (const item of data.items) {
+      const product = productsById.get(item.productId);
+
+      if (!product.isActive) {
+        throw new HttpError(
+          400,
+          `${product.name} is inactive and cannot be sold`
+        );
+      }
+
+      const inventory = product.inventory;
+      const availableQuantity = inventory
+        ? inventory.quantity -
+          inventory.reservedQuantity +
+          (currentQuantityByProduct.get(product.id) || 0)
+        : 0;
+
+      if (availableQuantity < item.quantity) {
+        throw new HttpError(
+          409,
+          `Only ${availableQuantity} unit(s) of ${product.name} are available`
+        );
+      }
+
+      totalCents +=
+        moneyToCents(product.sellingPrice.toFixed(2)) *
+        BigInt(item.quantity);
+    }
+
+    const paymentTotalCents = data.payments.reduce(
+      (total, payment) => total + (payment.amountCents || 0n),
+      0n
+    );
+
+    if (totalCents > 0n && data.payments.length === 0) {
+      throw new HttpError(400, "At least one payment is required");
+    }
+
+    if (paymentTotalCents !== totalCents) {
+      throw new HttpError(
+        400,
+        `Payment total must equal the order total of ${centsToMoney(totalCents)}`
+      );
+    }
+
+    for (const item of existingSale.items) {
+      await transaction.inventory.update({
+        where: { productId: item.productId },
+        data: { reservedQuantity: { decrement: item.quantity } },
+      });
+    }
+
+    await transaction.payment.deleteMany({ where: { saleId } });
+    await transaction.saleItem.deleteMany({ where: { saleId } });
+
+    for (const item of data.items) {
+      const product = productsById.get(item.productId);
+
+      await transaction.saleItem.create({
+        data: {
+          saleId,
+          productId: product.id,
+          quantity: item.quantity,
+          unitPrice: product.sellingPrice,
+          costPriceAtSale: product.costPrice,
+        },
+      });
+
+      await transaction.inventory.update({
+        where: { productId: product.id },
+        data: { reservedQuantity: { increment: item.quantity } },
+      });
+    }
+
+    for (const payment of data.payments) {
+      await transaction.payment.create({
+        data: {
+          saleId,
+          paymentMethod: payment.paymentMethod,
+          bankName: payment.bankName,
+          transactionReference: payment.transactionReference,
+          amount: centsToMoney(payment.amountCents),
+          recordedById: req.user.id,
+        },
+      });
+    }
+
+    await transaction.sale.update({
+      where: { id: saleId },
+      data: {
+        customerName: data.customerName,
+        totalAmount: centsToMoney(totalCents),
+      },
+    });
+
+    await transaction.auditLog.create({
+      data: {
+        userId: req.user.id,
+        action: "UPDATE_SALE",
+        entityType: "SALE",
+        entityId: saleId,
+        details: {
+          saleNumber: existingSale.saleNumber,
+          itemCount: data.items.length,
+          paymentMethods: data.payments.map(
+            (payment) => payment.paymentMethod
+          ),
+        },
+      },
+    });
+
+    return transaction.sale.findUnique({
+      where: { id: saleId },
+      include: saleInclude,
+    });
+  });
+
+  return res.json({
+    success: true,
+    message: "Order updated and inventory reservations recalculated",
+    data: { sale: serializeSale(sale) },
+  });
+}
+
 async function listSales(req, res) {
   const status = String(req.query.status || "").trim().toUpperCase();
   const where = {};
@@ -357,7 +550,7 @@ async function listSales(req, res) {
 async function getSale(req, res) {
   const saleId = Number(req.params.id);
 
-  if (!Number.isInteger(saleId)) {
+  if (!Number.isInteger(saleId) || saleId <= 0) {
     return res.status(400).json({ success: false, message: "Invalid sale ID" });
   }
 
@@ -384,7 +577,7 @@ async function cancelSale(req, res) {
   const saleId = Number(req.params.id);
   const reason = String(req.body.reason || "").trim();
 
-  if (!Number.isInteger(saleId)) {
+  if (!Number.isInteger(saleId) || saleId <= 0) {
     return res.status(400).json({ success: false, message: "Invalid sale ID" });
   }
 
@@ -472,6 +665,7 @@ async function cancelSale(req, res) {
 
 module.exports = {
   createSale,
+  updateSale,
   listSales,
   getSale,
   cancelSale,

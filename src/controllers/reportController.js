@@ -65,7 +65,16 @@ async function adminDashboard() {
     prisma.inventory.findMany({
       include: {
         product: {
-          select: { id: true, sku: true, name: true, costPrice: true, isActive: true },
+          select: {
+            id: true,
+            sku: true,
+            name: true,
+            length: true,
+            width: true,
+            thickness: true,
+            costPrice: true,
+            isActive: true,
+          },
         },
       },
     }),
@@ -173,7 +182,18 @@ async function inventoryDashboard() {
       orderBy: { createdAt: "asc" },
     }),
     prisma.inventory.findMany({
-      include: { product: { select: { sku: true, name: true, isActive: true } } },
+      include: {
+        product: {
+          select: {
+            sku: true,
+            name: true,
+            length: true,
+            width: true,
+            thickness: true,
+            isActive: true,
+          },
+        },
+      },
     }),
     prisma.stockReceipt.findMany({
       take: 5,
@@ -419,7 +439,16 @@ async function getProfitReport(req, res) {
     },
     take: 5000,
     include: {
-      product: { select: { id: true, sku: true, name: true } },
+      product: {
+        select: {
+          id: true,
+          sku: true,
+          name: true,
+          length: true,
+          width: true,
+          thickness: true,
+        },
+      },
       sale: {
         select: {
           createdAt: true,
@@ -445,6 +474,9 @@ async function getProfitReport(req, res) {
           productId: item.productId,
           sku: item.product.sku,
           name: item.product.name,
+          length: item.product.length,
+          width: item.product.width,
+          thickness: item.product.thickness,
         })
       );
     }
@@ -495,7 +527,15 @@ async function getLowStockAlerts(req, res) {
   const inventory = await prisma.inventory.findMany({
     include: {
       product: {
-        select: { id: true, sku: true, name: true, isActive: true },
+        select: {
+          id: true,
+          sku: true,
+          name: true,
+          length: true,
+          width: true,
+          thickness: true,
+          isActive: true,
+        },
       },
     },
   });

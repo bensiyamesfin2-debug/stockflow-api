@@ -4,7 +4,44 @@ const {
   normalizeOptionalText,
 } = require("../utils/validation");
 
-const SKU_PATTERN = /^[A-Z0-9][A-Z0-9._/-]{1,99}$/;
+const PRODUCT_FAMILIES = new Map([
+  ["galaxy", "Galaxy"],
+  ["640", "640"],
+  ["602", "602"],
+  ["markino", "Markino"],
+]);
+
+const ALLOWED_MEASUREMENTS = new Set([
+  "220x34x3", "200x34x3", "180x34x3", "160x34x3", "150x34x3",
+  "140x34x3", "130x34x3", "125x34x3", "120x34x3", "115x34x3",
+  "220x30x3", "200x30x3", "180x30x3", "160x30x3", "150x30x3",
+  "140x30x3", "125x30x3",
+  "220x28x3", "200x28x3", "180x28x3", "160x28x3", "150x28x3",
+  "140x28x3", "125x28x3",
+  "220x25x3", "200x25x3", "180x25x3", "160x25x3", "150x25x3",
+  "140x25x3", "125x25x3",
+  "240x63x2", "220x63x2",
+  "220x50x2", "200x50x2", "180x50x2", "160x50x2", "150x50x2",
+  "140x50x2", "125x50x2",
+  "220x40x2", "200x40x2", "180x40x2", "160x40x2", "150x40x2",
+  "140x40x2", "125x40x2",
+  "220x30x2", "200x30x2", "180x30x2", "160x30x2", "150x30x2",
+  "125x30x2",
+  "200x25x2", "180x25x2", "160x25x2", "150x25x2", "140x25x2",
+  "125x25x2",
+  "200x20x2", "180x20x2", "160x20x2", "150x20x2", "140x20x2",
+  "125x20x2",
+  "40x40x1",
+]);
+
+function measurementKey(length, width, thickness) {
+  return `${length}x${width}x${thickness}`;
+}
+
+function makeInternalSku(name, length, width, thickness) {
+  const family = name.toUpperCase().replace(/[^A-Z0-9]+/g, "-");
+  return `${family}-${length}-${width}-${thickness}`;
+}
 
 function serializeProduct(product) {
   const inventory = product.inventory
@@ -17,6 +54,10 @@ function serializeProduct(product) {
 
   return {
     ...product,
+    measurement:
+      product.length && product.width && product.thickness
+        ? `${product.length} × ${product.width} × ${product.thickness}`
+        : null,
     inventory,
     lowStock: inventory
       ? inventory.availableQuantity <= inventory.reorderLevel
@@ -28,24 +69,36 @@ function validateProductInput(body, partial = false) {
   const data = {};
   const errors = [];
 
-  if (!partial || body.sku !== undefined) {
-    const sku = String(body.sku || "").trim().toUpperCase();
-    if (!SKU_PATTERN.test(sku)) {
-      errors.push(
-        "SKU must be 2-100 characters using letters, numbers, dots, underscores, slashes, or hyphens"
-      );
-    } else {
-      data.sku = sku;
-    }
-  }
-
   if (!partial || body.name !== undefined) {
-    const name = String(body.name || "").trim();
-    if (name.length < 2 || name.length > 200) {
-      errors.push("Product name must be between 2 and 200 characters");
+    const normalizedName = String(body.name || "").trim().toLowerCase();
+    const name = PRODUCT_FAMILIES.get(normalizedName);
+    if (!name) {
+      errors.push("Product must be Galaxy, 640, 602, or Markino");
     } else {
       data.name = name;
     }
+  }
+
+  for (const field of ["length", "width", "thickness"]) {
+    if (!partial || body[field] !== undefined) {
+      const value = Number(body[field]);
+      if (!Number.isInteger(value) || value <= 0) {
+        errors.push(`${field[0].toUpperCase()}${field.slice(1)} must be a positive whole number`);
+      } else {
+        data[field] = value;
+      }
+    }
+  }
+
+  if (
+    data.length !== undefined &&
+    data.width !== undefined &&
+    data.thickness !== undefined &&
+    !ALLOWED_MEASUREMENTS.has(
+      measurementKey(data.length, data.width, data.thickness)
+    )
+  ) {
+    errors.push("Choose a measurement from the approved measurement sheet");
   }
 
   if (body.description !== undefined) {
@@ -109,34 +162,66 @@ async function createProduct(req, res) {
     return res.status(400).json({ success: false, message: errors[0], errors });
   }
 
+  data.sku = makeInternalSku(
+    data.name,
+    data.length,
+    data.width,
+    data.thickness
+  );
+
   const existingProduct = await prisma.product.findUnique({
     where: { sku: data.sku },
   });
 
-  if (existingProduct) {
+  if (existingProduct?.isActive) {
     return res.status(409).json({
       success: false,
-      message: "A product with that SKU already exists",
+      message: "That product and measurement already exist",
     });
   }
 
   try {
     const product = await prisma.$transaction(async (transaction) => {
-      const createdProduct = await transaction.product.create({
-        data: {
-          ...data,
-          inventory: { create: { quantity: 0, reorderLevel } },
-        },
-        include: { inventory: true },
-      });
+      const createdProduct = existingProduct
+        ? await transaction.product.update({
+            where: { id: existingProduct.id },
+            data: { ...data, isActive: true },
+            include: { inventory: true },
+          })
+        : await transaction.product.create({
+            data: {
+              ...data,
+              inventory: { create: { quantity: 0, reorderLevel } },
+            },
+            include: { inventory: true },
+          });
+
+      if (existingProduct) {
+        await transaction.inventory.upsert({
+          where: { productId: existingProduct.id },
+          update: { reorderLevel },
+          create: {
+            productId: existingProduct.id,
+            quantity: 0,
+            reorderLevel,
+          },
+        });
+      }
 
       await transaction.auditLog.create({
         data: {
           userId: req.user.id,
-          action: "CREATE_PRODUCT",
+          action: existingProduct ? "RESTORE_PRODUCT" : "CREATE_PRODUCT",
           entityType: "PRODUCT",
           entityId: createdProduct.id,
-          details: { sku: createdProduct.sku },
+          details: {
+            product: createdProduct.name,
+            measurement: measurementKey(
+              createdProduct.length,
+              createdProduct.width,
+              createdProduct.thickness
+            ),
+          },
         },
       });
 
@@ -152,7 +237,7 @@ async function createProduct(req, res) {
     if (error.code === "P2002") {
       return res.status(409).json({
         success: false,
-        message: "A product with that SKU already exists",
+        message: "That product and measurement already exist",
       });
     }
 
@@ -164,10 +249,12 @@ async function listProducts(req, res) {
   const search = String(req.query.search || "").trim();
   const where = {};
 
-  if (req.user.role !== "ADMIN") {
-    where.isActive = true;
+  if (req.query.active === "all" && req.user.role === "ADMIN") {
+    // Administrators can explicitly request the retired catalogue for audits.
   } else if (req.query.active === "true" || req.query.active === "false") {
     where.isActive = req.query.active === "true";
+  } else {
+    where.isActive = true;
   }
 
   if (search) {
@@ -180,7 +267,12 @@ async function listProducts(req, res) {
   const products = await prisma.product.findMany({
     where,
     include: { inventory: true },
-    orderBy: { name: "asc" },
+    orderBy: [
+      { name: "asc" },
+      { thickness: "desc" },
+      { width: "desc" },
+      { length: "desc" },
+    ],
   });
 
   return res.json({
@@ -192,7 +284,7 @@ async function listProducts(req, res) {
 async function getProduct(req, res) {
   const productId = Number(req.params.id);
 
-  if (!Number.isInteger(productId)) {
+  if (!Number.isInteger(productId) || productId <= 0) {
     return res.status(400).json({ success: false, message: "Invalid product ID" });
   }
 
@@ -214,7 +306,7 @@ async function getProduct(req, res) {
 async function updateProduct(req, res) {
   const productId = Number(req.params.id);
 
-  if (!Number.isInteger(productId)) {
+  if (!Number.isInteger(productId) || productId <= 0) {
     return res.status(400).json({ success: false, message: "Invalid product ID" });
   }
 
@@ -237,6 +329,36 @@ async function updateProduct(req, res) {
 
   if (!existingProduct) {
     return res.status(404).json({ success: false, message: "Product not found" });
+  }
+
+  const nextName = data.name ?? existingProduct.name;
+  const nextLength = data.length ?? existingProduct.length;
+  const nextWidth = data.width ?? existingProduct.width;
+  const nextThickness = data.thickness ?? existingProduct.thickness;
+
+  if (
+    !ALLOWED_MEASUREMENTS.has(
+      measurementKey(nextLength, nextWidth, nextThickness)
+    )
+  ) {
+    return res.status(400).json({
+      success: false,
+      message: "Choose a measurement from the approved measurement sheet",
+    });
+  }
+
+  if (
+    data.name !== undefined ||
+    data.length !== undefined ||
+    data.width !== undefined ||
+    data.thickness !== undefined
+  ) {
+    data.sku = makeInternalSku(
+      nextName,
+      nextLength,
+      nextWidth,
+      nextThickness
+    );
   }
 
   try {
@@ -281,7 +403,7 @@ async function updateProduct(req, res) {
     if (error.code === "P2002") {
       return res.status(409).json({
         success: false,
-        message: "A product with that SKU already exists",
+        message: "That product and measurement already exist",
       });
     }
 
@@ -289,9 +411,62 @@ async function updateProduct(req, res) {
   }
 }
 
+async function deleteProduct(req, res) {
+  const productId = Number(req.params.id);
+
+  if (!Number.isInteger(productId) || productId <= 0) {
+    return res.status(400).json({ success: false, message: "Invalid product ID" });
+  }
+
+  const product = await prisma.product.findUnique({
+    where: { id: productId },
+    include: { inventory: true },
+  });
+
+  if (!product) {
+    return res.status(404).json({ success: false, message: "Product not found" });
+  }
+
+  if ((product.inventory?.reservedQuantity || 0) > 0) {
+    return res.status(409).json({
+      success: false,
+      message: "This product is reserved on an open order and cannot be deleted",
+    });
+  }
+
+  await prisma.$transaction(async (transaction) => {
+    await transaction.product.update({
+      where: { id: productId },
+      data: { isActive: false },
+    });
+    await transaction.auditLog.create({
+      data: {
+        userId: req.user.id,
+        action: "DELETE_PRODUCT",
+        entityType: "PRODUCT",
+        entityId: productId,
+        details: {
+          product: product.name,
+          measurement: measurementKey(
+            product.length,
+            product.width,
+            product.thickness
+          ),
+        },
+      },
+    });
+  });
+
+  return res.json({
+    success: true,
+    message: "Product removed from the active catalogue",
+  });
+}
+
 module.exports = {
   createProduct,
   listProducts,
   getProduct,
   updateProduct,
+  deleteProduct,
 };

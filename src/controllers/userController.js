@@ -1,5 +1,7 @@
 const bcrypt = require("bcrypt");
 const prisma = require("../config/prisma");
+const HttpError = require("../utils/HttpError");
+const { runSerializableTransaction } = require("../utils/transaction");
 
 const ALLOWED_ROLES = new Set(["ADMIN", "CASHIER", "INVENTORY_STAFF"]);
 const USERNAME_PATTERN = /^[a-z0-9._-]{3,50}$/;
@@ -133,7 +135,11 @@ async function updateUserStatus(req, res) {
   const userId = Number(req.params.id);
   const isActive = req.body.isActive;
 
-  if (!Number.isInteger(userId) || typeof isActive !== "boolean") {
+  if (
+    !Number.isInteger(userId) ||
+    userId <= 0 ||
+    typeof isActive !== "boolean"
+  ) {
     return res.status(400).json({
       success: false,
       message: "A valid user ID and boolean isActive value are required",
@@ -156,10 +162,44 @@ async function updateUserStatus(req, res) {
     });
   }
 
-  const user = await prisma.$transaction(async (transaction) => {
+  if (existingUser.isActive === isActive) {
+    return res.json({
+      success: true,
+      message: `User is already ${isActive ? "active" : "inactive"}`,
+      data: {
+        user: {
+          id: existingUser.id,
+          fullName: existingUser.fullName,
+          username: existingUser.username,
+          role: existingUser.role,
+          isActive: existingUser.isActive,
+        },
+      },
+    });
+  }
+
+  const user = await runSerializableTransaction(async (transaction) => {
+    if (!isActive && existingUser.role === "ADMIN") {
+      const activeAdministratorCount = await transaction.user.count({
+        where: { role: "ADMIN", isActive: true },
+      });
+
+      if (activeAdministratorCount <= 1) {
+        throw new HttpError(
+          409,
+          "At least one active administrator account is required"
+        );
+      }
+    }
+
     const updatedUser = await transaction.user.update({
       where: { id: userId },
-      data: { isActive },
+      data: {
+        isActive,
+        // Status changes are a security boundary. Invalidate every session so
+        // a previously deactivated account cannot reuse an old token later.
+        tokenVersion: { increment: 1 },
+      },
       select: {
         id: true,
         fullName: true,

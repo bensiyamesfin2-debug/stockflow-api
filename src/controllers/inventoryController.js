@@ -74,11 +74,7 @@ function validateReceipt(body) {
 
 async function listInventory(req, res) {
   const search = String(req.query.search || "").trim();
-  const productWhere = {};
-
-  if (req.user.role === "CASHIER") {
-    productWhere.isActive = true;
-  }
+  const productWhere = { isActive: true };
 
   if (search) {
     productWhere.OR = [
@@ -95,6 +91,9 @@ async function listInventory(req, res) {
           id: true,
           sku: true,
           name: true,
+          length: true,
+          width: true,
+          thickness: true,
           sellingPrice: true,
           costPrice: true,
           isActive: true,
@@ -220,7 +219,16 @@ async function createStockReceipt(req, res) {
         },
         items: {
           include: {
-            product: { select: { id: true, sku: true, name: true } },
+            product: {
+              select: {
+                id: true,
+                sku: true,
+                name: true,
+                length: true,
+                width: true,
+                thickness: true,
+              },
+            },
           },
         },
       },
@@ -240,7 +248,18 @@ async function listStockReceipts(req, res) {
     include: {
       receivedBy: { select: { id: true, fullName: true, username: true } },
       items: {
-        include: { product: { select: { id: true, sku: true, name: true } } },
+        include: {
+          product: {
+            select: {
+              id: true,
+              sku: true,
+              name: true,
+              length: true,
+              width: true,
+              thickness: true,
+            },
+          },
+        },
       },
     },
     orderBy: { createdAt: "desc" },
@@ -252,15 +271,27 @@ async function listStockReceipts(req, res) {
 async function listInventoryMovements(req, res) {
   const productId = req.query.productId ? Number(req.query.productId) : undefined;
 
-  if (productId !== undefined && !Number.isInteger(productId)) {
+  if (
+    productId !== undefined &&
+    (!Number.isInteger(productId) || productId <= 0)
+  ) {
     return res.status(400).json({ success: false, message: "Invalid product ID" });
   }
 
   const movements = await prisma.inventoryMovement.findMany({
-    where: productId ? { productId } : undefined,
+    where: productId !== undefined ? { productId } : undefined,
     take: 100,
     include: {
-      product: { select: { id: true, sku: true, name: true } },
+      product: {
+        select: {
+          id: true,
+          sku: true,
+          name: true,
+          length: true,
+          width: true,
+          thickness: true,
+        },
+      },
       createdBy: { select: { id: true, fullName: true, username: true } },
     },
     orderBy: { createdAt: "desc" },

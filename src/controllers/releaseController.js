@@ -241,7 +241,16 @@ async function createRelease(req, res) {
           include: {
             saleItem: {
               include: {
-                product: { select: { id: true, sku: true, name: true } },
+                product: {
+                  select: {
+                    id: true,
+                    sku: true,
+                    name: true,
+                    length: true,
+                    width: true,
+                    thickness: true,
+                  },
+                },
               },
             },
           },
@@ -269,7 +278,18 @@ async function listReleases(req, res) {
       items: {
         include: {
           saleItem: {
-            include: { product: { select: { id: true, sku: true, name: true } } },
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  sku: true,
+                  name: true,
+                  length: true,
+                  width: true,
+                  thickness: true,
+                },
+              },
+            },
           },
         },
       },

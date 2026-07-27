@@ -1,6 +1,7 @@
 const express = require("express");
 const {
   createSale,
+  updateSale,
   listSales,
   getSale,
   cancelSale,
@@ -12,6 +13,7 @@ const router = express.Router();
 router.use(authenticate);
 router.get("/", listSales);
 router.post("/", authorizeRoles("ADMIN", "CASHIER"), createSale);
+router.patch("/:id", authorizeRoles("ADMIN", "CASHIER"), updateSale);
 router.post(
   "/:id/cancel",
   authorizeRoles("ADMIN", "CASHIER"),
