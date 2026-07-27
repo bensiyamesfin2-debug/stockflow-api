@@ -4,6 +4,7 @@ const HttpError = require("../utils/HttpError");
 const { moneyToCents, centsToMoney } = require("../utils/money");
 const { runSerializableTransaction } = require("../utils/transaction");
 const { normalizeClientRequestId } = require("../utils/clientRequestId");
+const { sellableUnitPriceCents } = require("../utils/salePricing");
 
 const PAYMENT_METHODS = new Set([
   "CASH",
@@ -227,7 +228,7 @@ async function createSale(req, res) {
         );
       }
 
-      totalCents += moneyToCents(product.sellingPrice.toFixed(2)) * BigInt(item.quantity);
+      totalCents += sellableUnitPriceCents(product) * BigInt(item.quantity);
     }
 
     const paymentTotalCents = data.payments.reduce(
@@ -419,9 +420,7 @@ async function updateSale(req, res) {
         );
       }
 
-      totalCents +=
-        moneyToCents(product.sellingPrice.toFixed(2)) *
-        BigInt(item.quantity);
+      totalCents += sellableUnitPriceCents(product) * BigInt(item.quantity);
     }
 
     const paymentTotalCents = data.payments.reduce(

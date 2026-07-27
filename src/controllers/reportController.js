@@ -2,6 +2,7 @@ const prisma = require("../config/prisma");
 const HttpError = require("../utils/HttpError");
 const { moneyToCents, centsToMoney } = require("../utils/money");
 const { buildLowStockAlerts } = require("../utils/lowStock");
+const { dashboardSaleInclude } = require("../utils/dashboardSaleInclude");
 
 function todayStart() {
   const date = new Date();
@@ -80,10 +81,7 @@ async function adminDashboard() {
     }),
     prisma.sale.findMany({
       take: 8,
-      include: {
-        cashier: { select: { fullName: true, username: true } },
-        items: { select: { quantity: true, releasedQuantity: true } },
-      },
+      include: dashboardSaleInclude,
       orderBy: { createdAt: "desc" },
     }),
     prisma.sale.findMany({
@@ -153,7 +151,7 @@ async function cashierDashboard(userId) {
     where: { cashierId: userId, createdAt: { gte: start } },
     take: 10,
     include: {
-      items: { select: { quantity: true, releasedQuantity: true } },
+      ...dashboardSaleInclude,
       payments: true,
     },
     orderBy: { createdAt: "desc" },
