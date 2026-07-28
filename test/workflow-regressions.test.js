@@ -12,6 +12,7 @@ const {
   serializePendingReleaseSale,
 } = require("../src/utils/releasePrivacy");
 const { buildSaleNotification } = require("../src/utils/saleNotification");
+const { normalizePushSubscription } = require("../src/utils/pushNotifications");
 
 test("dashboard recent-sale projection contains the product fields used by the UI", () => {
   assert.equal(dashboardSaleInclude.items.select.id, true);
@@ -122,4 +123,25 @@ test("inventory staff sale notifications contain release quantities but no price
   assert.match(notification.message, /2 item types/);
   assert.match(notification.message, /5 stock units/);
   assert.doesNotMatch(notification.message, /KES|price|payment|total/i);
+});
+
+test("device push subscriptions require secure endpoints and valid encryption keys", () => {
+  const valid = normalizePushSubscription({
+    endpoint: "https://push.example.test/subscription/123",
+    expirationTime: null,
+    keys: {
+      p256dh: "A".repeat(87),
+      auth: "B".repeat(22),
+    },
+  });
+
+  assert.equal(valid.endpoint, "https://push.example.test/subscription/123");
+  assert.equal(valid.expirationTime, null);
+  assert.equal(
+    normalizePushSubscription({
+      endpoint: "http://push.example.test/subscription/123",
+      keys: { p256dh: "A".repeat(87), auth: "B".repeat(22) },
+    }).error,
+    "The notification subscription must use HTTPS"
+  );
 });

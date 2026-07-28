@@ -63,6 +63,7 @@ model User {
   auditLogs           AuditLog[]          @relation("UserAuditLogs")
   loginPairings       LoginPairing[]
   notifications       Notification[]
+  pushSubscriptions   PushSubscription[]
 
   @@map("users")
 }
@@ -284,4 +285,19 @@ model Notification {
   @@index([userId, readAt, createdAt])
   @@index([saleId])
   @@map("notifications")
+}
+
+model PushSubscription {
+  id             Int      @id @default(autoincrement())
+  userId         Int      @map("user_id")
+  endpoint       String   @unique
+  p256dh         String   @db.VarChar(255)
+  auth           String   @db.VarChar(255)
+  expirationTime BigInt?  @map("expiration_time")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("push_subscriptions")
 }

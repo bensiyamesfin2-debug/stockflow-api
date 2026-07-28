@@ -7,6 +7,9 @@ const { normalizeClientRequestId } = require("../utils/clientRequestId");
 const { sellableUnitPriceCents } = require("../utils/salePricing");
 const { buildSaleNotification } = require("../utils/saleNotification");
 const {
+  sendNewSalePushNotification,
+} = require("../utils/pushNotifications");
+const {
   calculateCustomOrder,
   normalizeCustomMeasurement,
 } = require("../utils/customOrder");
@@ -354,7 +357,7 @@ async function createSale(req, res) {
       include: saleInclude,
     });
 
-      return { sale, repeated: false };
+      return { sale, repeated: false, notification };
     });
   } catch (error) {
     if (data.clientRequestId && error.code === "P2002") {
@@ -371,6 +374,16 @@ async function createSale(req, res) {
     } else {
       throw error;
     }
+  }
+
+  if (!result.repeated) {
+    void sendNewSalePushNotification({
+      saleId: result.sale.id,
+      title: result.notification.title,
+      message: result.notification.message,
+    }).catch((error) => {
+      console.error("Unable to prepare sale push notifications:", error.message);
+    });
   }
 
   return res.status(result.repeated ? 200 : 201).json({

@@ -1,4 +1,8 @@
 const prisma = require("../config/prisma");
+const {
+  getPushConfiguration,
+  normalizePushSubscription,
+} = require("../utils/pushNotifications");
 
 const notificationSelect = {
   id: true,
@@ -92,8 +96,82 @@ async function markAllNotificationsRead(req, res) {
   });
 }
 
+function getPushConfig(req, res) {
+  const configuration = getPushConfiguration();
+
+  return res.json({
+    success: true,
+    data: {
+      available: Boolean(configuration),
+      publicKey: configuration?.publicKey || null,
+    },
+  });
+}
+
+async function subscribeToPush(req, res) {
+  const configuration = getPushConfiguration();
+  if (!configuration) {
+    return res.status(503).json({
+      success: false,
+      message: "Device notifications are not configured yet",
+    });
+  }
+
+  const subscription = normalizePushSubscription(req.body);
+  if (subscription.error) {
+    return res.status(400).json({
+      success: false,
+      message: subscription.error,
+    });
+  }
+
+  await prisma.pushSubscription.upsert({
+    where: { endpoint: subscription.endpoint },
+    update: {
+      userId: req.user.id,
+      p256dh: subscription.p256dh,
+      auth: subscription.auth,
+      expirationTime: subscription.expirationTime,
+    },
+    create: {
+      userId: req.user.id,
+      endpoint: subscription.endpoint,
+      p256dh: subscription.p256dh,
+      auth: subscription.auth,
+      expirationTime: subscription.expirationTime,
+    },
+  });
+
+  return res.status(201).json({
+    success: true,
+    message: "Device notifications enabled",
+  });
+}
+
+async function unsubscribeFromPush(req, res) {
+  const endpoint = String(req.body?.endpoint || "").trim();
+  if (!endpoint) {
+    return res.status(400).json({
+      success: false,
+      message: "The notification subscription endpoint is required",
+    });
+  }
+
+  await prisma.pushSubscription.deleteMany({
+    where: { endpoint, userId: req.user.id },
+  });
+
+  return res.json({
+    success: true,
+    message: "Device notifications disabled",
+  });
+}
+
 module.exports = {
   listNotifications,
   markNotificationRead,
   markAllNotificationsRead,
+  getPushConfig,
+  subscribeToPush,
+  unsubscribeFromPush,
 };
