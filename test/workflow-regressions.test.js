@@ -11,6 +11,7 @@ const {
 const {
   serializePendingReleaseSale,
 } = require("../src/utils/releasePrivacy");
+const { buildSaleNotification } = require("../src/utils/saleNotification");
 
 test("dashboard recent-sale projection contains the product fields used by the UI", () => {
   assert.equal(dashboardSaleInclude.items.select.id, true);
@@ -107,4 +108,18 @@ test("warehouse release data excludes every price and payment field", () => {
   assert.equal(serialized.items[0].unitPrice, undefined);
   assert.equal(serialized.items[0].costPriceAtSale, undefined);
   assert.equal(serialized.items[0].remainingQuantity, 2);
+});
+
+test("inventory staff sale notifications contain release quantities but no prices", () => {
+  const notification = buildSaleNotification({
+    saleNumber: "SALE-20260728-ABC123",
+    customerName: "Mesfin",
+    items: [{ quantity: 2 }, { quantity: 3 }],
+  });
+
+  assert.equal(notification.title, "New sale awaiting release");
+  assert.match(notification.message, /SALE-20260728-ABC123/);
+  assert.match(notification.message, /2 item types/);
+  assert.match(notification.message, /5 stock units/);
+  assert.doesNotMatch(notification.message, /KES|price|payment|total/i);
 });

@@ -62,6 +62,7 @@ model User {
   inventoryMovements  InventoryMovement[] @relation("MovementCreatedBy")
   auditLogs           AuditLog[]          @relation("UserAuditLogs")
   loginPairings       LoginPairing[]
+  notifications       Notification[]
 
   @@map("users")
 }
@@ -130,6 +131,7 @@ model Sale {
   items              SaleItem[]
   payments           Payment[]
   releases           InventoryRelease[]
+  notifications      Notification[]
 
   @@index([cashierId])
   @@index([status, createdAt])
@@ -265,4 +267,21 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([userId, createdAt])
   @@map("audit_logs")
+}
+
+model Notification {
+  id        Int       @id @default(autoincrement())
+  userId    Int       @map("user_id")
+  saleId    Int?      @map("sale_id")
+  type      String    @db.VarChar(50)
+  title     String    @db.VarChar(160)
+  message   String
+  readAt    DateTime? @map("read_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sale      Sale?     @relation(fields: [saleId], references: [id], onDelete: SetNull)
+
+  @@index([userId, readAt, createdAt])
+  @@index([saleId])
+  @@map("notifications")
 }

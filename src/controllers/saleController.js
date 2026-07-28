@@ -5,6 +5,7 @@ const { moneyToCents, centsToMoney } = require("../utils/money");
 const { runSerializableTransaction } = require("../utils/transaction");
 const { normalizeClientRequestId } = require("../utils/clientRequestId");
 const { sellableUnitPriceCents } = require("../utils/salePricing");
+const { buildSaleNotification } = require("../utils/saleNotification");
 const {
   calculateCustomOrder,
   normalizeCustomMeasurement,
@@ -313,6 +314,26 @@ async function createSale(req, res) {
       });
     }
 
+    const inventoryStaff = await transaction.user.findMany({
+      where: { role: "INVENTORY_STAFF", isActive: true },
+      select: { id: true },
+    });
+    const notification = buildSaleNotification({
+      saleNumber: createdSale.saleNumber,
+      customerName: createdSale.customerName,
+      items: data.items,
+    });
+
+    if (inventoryStaff.length) {
+      await transaction.notification.createMany({
+        data: inventoryStaff.map((staff) => ({
+          userId: staff.id,
+          saleId: createdSale.id,
+          ...notification,
+        })),
+      });
+    }
+
     await transaction.auditLog.create({
       data: {
         userId: req.user.id,
@@ -322,6 +343,7 @@ async function createSale(req, res) {
         details: {
           saleNumber: createdSale.saleNumber,
           itemCount: data.items.length,
+          notifiedInventoryStaff: inventoryStaff.length,
           paymentMethods: data.payments.map((payment) => payment.paymentMethod),
         },
       },
