@@ -11,7 +11,7 @@ const { authenticate, authorizeRoles } = require("../middleware/auth");
 const router = express.Router();
 
 router.use(authenticate);
-router.get("/", listSales);
+router.get("/", authorizeRoles("ADMIN", "CASHIER"), listSales);
 router.post("/", authorizeRoles("ADMIN", "CASHIER"), createSale);
 router.patch("/:id", authorizeRoles("ADMIN", "CASHIER"), updateSale);
 router.post(
@@ -19,6 +19,6 @@ router.post(
   authorizeRoles("ADMIN", "CASHIER"),
   cancelSale
 );
-router.get("/:id", getSale);
+router.get("/:id", authorizeRoles("ADMIN", "CASHIER"), getSale);
 
 module.exports = router;

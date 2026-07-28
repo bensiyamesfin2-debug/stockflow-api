@@ -2,6 +2,7 @@ const { randomUUID } = require("crypto");
 const prisma = require("../config/prisma");
 const HttpError = require("../utils/HttpError");
 const { runSerializableTransaction } = require("../utils/transaction");
+const { serializePendingReleaseSale } = require("../utils/releasePrivacy");
 
 function makeReleaseNumber() {
   const date = new Date().toISOString().slice(0, 10).replaceAll("-", "");
@@ -62,7 +63,6 @@ async function listPendingReleases(req, res) {
     },
     include: {
       cashier: { select: { id: true, fullName: true, username: true } },
-      payments: true,
       items: {
         include: {
           product: {
@@ -74,14 +74,7 @@ async function listPendingReleases(req, res) {
     orderBy: { createdAt: "asc" },
   });
 
-  const pendingSales = sales.map((sale) => ({
-    ...sale,
-    items: sale.items.map((item) => ({
-      ...item,
-      remainingQuantity: item.quantity - item.releasedQuantity,
-      physicalStock: item.product.inventory?.quantity || 0,
-    })),
-  }));
+  const pendingSales = sales.map(serializePendingReleaseSale);
 
   return res.json({ success: true, data: { sales: pendingSales } });
 }

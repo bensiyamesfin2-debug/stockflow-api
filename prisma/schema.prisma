@@ -137,16 +137,21 @@ model Sale {
 }
 
 model SaleItem {
-  id               Int                    @id @default(autoincrement())
-  saleId           Int                    @map("sale_id")
-  productId        Int                    @map("product_id")
-  quantity         Int
-  unitPrice        Decimal                @map("unit_price") @db.Decimal(12, 2)
-  costPriceAtSale  Decimal?               @map("cost_price_at_sale") @db.Decimal(12, 2)
-  releasedQuantity Int                    @default(0) @map("released_quantity")
-  sale             Sale                   @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  product          Product                @relation(fields: [productId], references: [id], onDelete: Restrict)
-  releaseItems     InventoryReleaseItem[]
+  id                 Int                    @id @default(autoincrement())
+  saleId             Int                    @map("sale_id")
+  productId          Int                    @map("product_id")
+  quantity           Int
+  unitPrice          Decimal                @map("unit_price") @db.Decimal(12, 2)
+  costPriceAtSale    Decimal?               @map("cost_price_at_sale") @db.Decimal(12, 2)
+  releasedQuantity   Int                    @default(0) @map("released_quantity")
+  customLength       Int?                   @map("custom_length")
+  customWidth        Int?                   @map("custom_width")
+  customThickness    Int?                   @map("custom_thickness")
+  requestedPieces    Int?                   @map("requested_pieces")
+  piecesPerStockUnit Int?                   @map("pieces_per_stock_unit")
+  sale               Sale                   @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product            Product                @relation(fields: [productId], references: [id], onDelete: Restrict)
+  releaseItems       InventoryReleaseItem[]
 
   @@unique([saleId, productId])
   @@index([productId])

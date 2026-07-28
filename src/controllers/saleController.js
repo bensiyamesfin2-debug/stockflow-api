@@ -5,6 +5,10 @@ const { moneyToCents, centsToMoney } = require("../utils/money");
 const { runSerializableTransaction } = require("../utils/transaction");
 const { normalizeClientRequestId } = require("../utils/clientRequestId");
 const { sellableUnitPriceCents } = require("../utils/salePricing");
+const {
+  calculateCustomOrder,
+  normalizeCustomMeasurement,
+} = require("../utils/customOrder");
 
 const PAYMENT_METHODS = new Set([
   "CASH",
@@ -92,6 +96,11 @@ function validateSaleRequest(body) {
     rawItems.forEach((rawItem, index) => {
       const productId = Number(rawItem?.productId);
       const quantity = Number(rawItem?.quantity);
+      const customMeasurement = normalizeCustomMeasurement(
+        rawItem?.customMeasurement,
+        index + 1,
+        errors
+      );
 
       if (!Number.isInteger(productId) || productId <= 0) {
         errors.push(`Sale item ${index + 1} has an invalid product ID`);
@@ -106,7 +115,7 @@ function validateSaleRequest(body) {
       }
 
       productIds.add(productId);
-      items.push({ productId, quantity });
+      items.push({ productId, quantity, customMeasurement });
     });
   }
 
@@ -217,6 +226,16 @@ async function createSale(req, res) {
       }
 
       const inventory = product.inventory;
+      if (item.customMeasurement) {
+        const calculation = calculateCustomOrder(product, item.customMeasurement);
+        if (item.quantity !== calculation.quantity) {
+          throw new HttpError(
+            409,
+            `The custom order requires ${calculation.quantity} stock unit(s)`
+          );
+        }
+        item.piecesPerStockUnit = calculation.piecesPerStockUnit;
+      }
       const availableQuantity = inventory
         ? inventory.quantity - inventory.reservedQuantity
         : 0;
@@ -267,6 +286,11 @@ async function createSale(req, res) {
           quantity: item.quantity,
           unitPrice: product.sellingPrice,
           costPriceAtSale: product.costPrice,
+          customLength: item.customMeasurement?.length || null,
+          customWidth: item.customMeasurement?.width || null,
+          customThickness: item.customMeasurement?.thickness || null,
+          requestedPieces: item.customMeasurement?.pieces || null,
+          piecesPerStockUnit: item.piecesPerStockUnit || null,
         },
       });
 
@@ -407,6 +431,16 @@ async function updateSale(req, res) {
       }
 
       const inventory = product.inventory;
+      if (item.customMeasurement) {
+        const calculation = calculateCustomOrder(product, item.customMeasurement);
+        if (item.quantity !== calculation.quantity) {
+          throw new HttpError(
+            409,
+            `The custom order requires ${calculation.quantity} stock unit(s)`
+          );
+        }
+        item.piecesPerStockUnit = calculation.piecesPerStockUnit;
+      }
       const availableQuantity = inventory
         ? inventory.quantity -
           inventory.reservedQuantity +
@@ -459,6 +493,11 @@ async function updateSale(req, res) {
           quantity: item.quantity,
           unitPrice: product.sellingPrice,
           costPriceAtSale: product.costPrice,
+          customLength: item.customMeasurement?.length || null,
+          customWidth: item.customMeasurement?.width || null,
+          customThickness: item.customMeasurement?.thickness || null,
+          requestedPieces: item.customMeasurement?.pieces || null,
+          piecesPerStockUnit: item.piecesPerStockUnit || null,
         },
       });
 

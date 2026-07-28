@@ -7,6 +7,11 @@ const dashboardSaleInclude = {
       id: true,
       quantity: true,
       releasedQuantity: true,
+      customLength: true,
+      customWidth: true,
+      customThickness: true,
+      requestedPieces: true,
+      piecesPerStockUnit: true,
       product: {
         select: {
           id: true,
