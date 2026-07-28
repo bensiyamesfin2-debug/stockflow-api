@@ -34,7 +34,7 @@ function acceptsPublicRequest(ip) {
 async function createLead(req, res) {
   const successResponse = {
     success: true,
-    message: "Thanks — your demo request is saved. We will contact you soon.",
+    message: "Thanks — your project request is saved. We will contact you soon.",
   };
 
   if (String(req.body.website || "").trim()) {

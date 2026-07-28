@@ -307,6 +307,7 @@ model SalesLead {
   fullName     String   @map("full_name") @db.VarChar(100)
   businessName String   @map("business_name") @db.VarChar(150)
   phone        String   @db.VarChar(30)
+  interest     String   @default("STOCKFLOW") @db.VarChar(50)
   city         String?  @db.VarChar(100)
   message      String?
   status       String   @default("NEW") @db.VarChar(30)
