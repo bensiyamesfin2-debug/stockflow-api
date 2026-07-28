@@ -13,6 +13,10 @@ const {
 } = require("../src/utils/releasePrivacy");
 const { buildSaleNotification } = require("../src/utils/saleNotification");
 const { normalizePushSubscription } = require("../src/utils/pushNotifications");
+const {
+  normalizeProductName,
+  makeInternalSku,
+} = require("../src/utils/productCatalog");
 
 test("dashboard recent-sale projection contains the product fields used by the UI", () => {
   assert.equal(dashboardSaleInclude.items.select.id, true);
@@ -143,5 +147,20 @@ test("device push subscriptions require secure endpoints and valid encryption ke
       keys: { p256dh: "A".repeat(87), auth: "B".repeat(22) },
     }).error,
     "The notification subscription must use HTTPS"
+  );
+});
+
+test("new product families retain the approved measurement SKU identity", () => {
+  assert.deepEqual(normalizeProductName("  Spray   White  "), {
+    name: "Spray White",
+  });
+  assert.deepEqual(normalizeProductName("galaxy"), { name: "Galaxy" });
+  assert.equal(
+    makeInternalSku("Spray White", 220, 34, 3),
+    makeInternalSku("spray white", 220, 34, 3)
+  );
+  assert.match(
+    makeInternalSku("Spray White", 220, 34, 3),
+    /^SPRAY-WHITE-[A-F0-9]{8}-220-34-3$/
   );
 });

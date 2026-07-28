@@ -3,13 +3,10 @@ const {
   normalizeMoney,
   normalizeOptionalText,
 } = require("../utils/validation");
-
-const PRODUCT_FAMILIES = new Map([
-  ["galaxy", "Galaxy"],
-  ["640", "640"],
-  ["602", "602"],
-  ["markino", "Markino"],
-]);
+const {
+  normalizeProductName,
+  makeInternalSku,
+} = require("../utils/productCatalog");
 
 const ALLOWED_MEASUREMENTS = new Set([
   "220x34x3", "200x34x3", "180x34x3", "160x34x3", "150x34x3",
@@ -36,11 +33,6 @@ const ALLOWED_MEASUREMENTS = new Set([
 
 function measurementKey(length, width, thickness) {
   return `${length}x${width}x${thickness}`;
-}
-
-function makeInternalSku(name, length, width, thickness) {
-  const family = name.toUpperCase().replace(/[^A-Z0-9]+/g, "-");
-  return `${family}-${length}-${width}-${thickness}`;
 }
 
 function serializeProduct(product) {
@@ -70,12 +62,11 @@ function validateProductInput(body, partial = false) {
   const errors = [];
 
   if (!partial || body.name !== undefined) {
-    const normalizedName = String(body.name || "").trim().toLowerCase();
-    const name = PRODUCT_FAMILIES.get(normalizedName);
-    if (!name) {
-      errors.push("Product must be Galaxy, 640, 602, or Markino");
+    const normalizedName = normalizeProductName(body.name);
+    if (normalizedName.error) {
+      errors.push(normalizedName.error);
     } else {
-      data.name = name;
+      data.name = normalizedName.name;
     }
   }
 
@@ -162,6 +153,10 @@ async function createProduct(req, res) {
     return res.status(400).json({ success: false, message: errors[0], errors });
   }
 
+  if (req.user.role === "INVENTORY_STAFF") {
+    data.sellingPrice = "0";
+  }
+
   data.sku = makeInternalSku(
     data.name,
     data.length,
@@ -178,6 +173,9 @@ async function createProduct(req, res) {
       success: false,
       message: "That product and measurement already exist",
     });
+  }
+  if (req.user.role === "INVENTORY_STAFF" && existingProduct) {
+    delete data.sellingPrice;
   }
 
   try {
