@@ -76,6 +76,7 @@ async function createEncryptedBackup(req, res) {
         stockReceiptItems,
         inventoryMovements,
         auditLogs,
+        salesLeads,
       ] = await Promise.all([
         transaction.user.findMany({ orderBy: { id: "asc" } }),
         transaction.product.findMany({ orderBy: { id: "asc" } }),
@@ -89,6 +90,7 @@ async function createEncryptedBackup(req, res) {
         transaction.stockReceiptItem.findMany({ orderBy: { id: "asc" } }),
         transaction.inventoryMovement.findMany({ orderBy: { id: "asc" } }),
         transaction.auditLog.findMany({ orderBy: { id: "asc" } }),
+        transaction.salesLead.findMany({ orderBy: { id: "asc" } }),
       ]);
 
       return {
@@ -104,6 +106,7 @@ async function createEncryptedBackup(req, res) {
         stockReceiptItems,
         inventoryMovements,
         auditLogs,
+        salesLeads,
       };
     },
     {

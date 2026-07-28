@@ -4,6 +4,7 @@ const prisma = require("./config/prisma");
 
 const authRoutes = require("./routes/authRoutes");
 const inventoryRoutes = require("./routes/inventoryRoutes");
+const leadRoutes = require("./routes/leadRoutes");
 const notificationRoutes = require("./routes/notificationRoutes");
 const productRoutes = require("./routes/productRoutes");
 const releaseRoutes = require("./routes/releaseRoutes");
@@ -94,6 +95,7 @@ app.use("/api/reports", reportRoutes);
 app.use("/api/sales", saleRoutes);
 app.use("/api/security", securityRoutes);
 app.use("/api/inventory", inventoryRoutes);
+app.use("/api/leads", leadRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/users", userRoutes);
 app.use(

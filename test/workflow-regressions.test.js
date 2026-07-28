@@ -17,6 +17,44 @@ const {
   normalizeProductName,
   makeInternalSku,
 } = require("../src/utils/productCatalog");
+const {
+  normalizeSalesLead,
+  normalizeLeadStatus,
+} = require("../src/utils/salesLead");
+
+test("public sales enquiries are normalized without exposing arbitrary fields", () => {
+  assert.deepEqual(
+    normalizeSalesLead({
+      fullName: "  Hana   Bekele ",
+      businessName: " Addis Stone ",
+      phone: "+251 911 234 567",
+      city: " Addis Ababa ",
+      message: "Please show us the warehouse flow.",
+      status: "CLOSED",
+    }),
+    {
+      data: {
+        fullName: "Hana Bekele",
+        businessName: "Addis Stone",
+        phone: "+251 911 234 567",
+        city: "Addis Ababa",
+        message: "Please show us the warehouse flow.",
+      },
+    }
+  );
+
+  assert.equal(normalizeLeadStatus("contacted"), "CONTACTED");
+  assert.equal(normalizeLeadStatus("invented"), null);
+});
+
+test("public sales enquiries reject invalid contact information", () => {
+  const result = normalizeSalesLead({
+    fullName: "A",
+    businessName: "",
+    phone: "call me",
+  });
+  assert.equal(result.errors.length, 3);
+});
 
 test("dashboard recent-sale projection contains the product fields used by the UI", () => {
   assert.equal(dashboardSaleInclude.items.select.id, true);

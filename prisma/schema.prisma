@@ -301,3 +301,18 @@ model PushSubscription {
   @@index([userId])
   @@map("push_subscriptions")
 }
+
+model SalesLead {
+  id           Int      @id @default(autoincrement())
+  fullName     String   @map("full_name") @db.VarChar(100)
+  businessName String   @map("business_name") @db.VarChar(150)
+  phone        String   @db.VarChar(30)
+  city         String?  @db.VarChar(100)
+  message      String?
+  status       String   @default("NEW") @db.VarChar(30)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([status, createdAt])
+  @@map("sales_leads")
+}
