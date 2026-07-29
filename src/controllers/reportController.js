@@ -43,6 +43,23 @@ function parseDateRange(query) {
   return { from, to };
 }
 
+async function findAllById(model, args, batchSize = 2000) {
+  const records = [];
+  let cursor;
+
+  while (true) {
+    const batch = await model.findMany({
+      ...args,
+      orderBy: { id: "asc" },
+      take: batchSize,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    records.push(...batch);
+    if (batch.length < batchSize) return records;
+    cursor = batch.at(-1).id;
+  }
+}
+
 async function adminDashboard() {
   const start = todayStart();
   const trendStart = new Date(start);
@@ -550,10 +567,196 @@ async function getLowStockAlerts(req, res) {
   return res.json({ success: true, data: { alerts, summary } });
 }
 
+async function getTopSellingReport(req, res) {
+  const { from, to } = parseDateRange(req.query);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
+  const items = await findAllById(prisma.saleItem, {
+    where: {
+      sale: { createdAt: { gte: from, lte: to }, status: { not: "CANCELLED" } },
+    },
+    include: {
+      product: {
+        select: { id: true, sku: true, name: true, length: true, width: true, thickness: true },
+      },
+    },
+  });
+  const buckets = new Map();
+  for (const item of items) {
+    const bucket = buckets.get(item.productId) || {
+      product: item.product,
+      quantity: 0,
+      revenueCents: 0n,
+    };
+    bucket.quantity += item.quantity;
+    bucket.revenueCents += moneyToCents(item.unitPrice.toFixed(2)) * BigInt(item.quantity);
+    buckets.set(item.productId, bucket);
+  }
+  const products = [...buckets.values()]
+    .map((bucket) => ({
+      product: bucket.product,
+      quantity: bucket.quantity,
+      revenue: centsToMoney(bucket.revenueCents),
+    }))
+    .sort((left, right) => right.quantity - left.quantity || Number(right.revenue) - Number(left.revenue))
+    .slice(0, limit);
+  return res.json({ success: true, data: { range: { from, to }, products } });
+}
+
+async function getDeadStockReport(req, res) {
+  const days = Math.min(Math.max(Number(req.query.days) || 90, 1), 3650);
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const inventory = await prisma.inventory.findMany({
+    where: { product: { isActive: true } },
+    include: {
+      product: {
+        include: {
+          saleItems: {
+            where: { sale: { status: { not: "CANCELLED" } } },
+            select: { sale: { select: { createdAt: true } } },
+            orderBy: { sale: { createdAt: "desc" } },
+            take: 1,
+          },
+        },
+      },
+    },
+    orderBy: { quantity: "desc" },
+  });
+  const products = inventory
+    .map((record) => {
+      const lastSoldAt = record.product.saleItems[0]?.sale.createdAt || null;
+      return {
+        product: {
+          id: record.product.id,
+          sku: record.product.sku,
+          name: record.product.name,
+          length: record.product.length,
+          width: record.product.width,
+          thickness: record.product.thickness,
+        },
+        quantity: record.quantity,
+        reservedQuantity: record.reservedQuantity,
+        lastSoldAt,
+        daysSinceLastSale: lastSoldAt
+          ? Math.floor((Date.now() - lastSoldAt.getTime()) / (24 * 60 * 60 * 1000))
+          : null,
+      };
+    })
+    .filter((record) => record.quantity > 0 && (!record.lastSoldAt || record.lastSoldAt < cutoff));
+  return res.json({
+    success: true,
+    data: {
+      cutoff,
+      days,
+      products,
+      totalUnits: products.reduce((sum, product) => sum + product.quantity, 0),
+    },
+  });
+}
+
+async function getProfitLossReport(req, res) {
+  const { from, to } = parseDateRange(req.query);
+  const [sales, items] = await Promise.all([
+    findAllById(prisma.sale, {
+      where: { createdAt: { gte: from, lte: to }, status: { not: "CANCELLED" } },
+      select: { id: true, totalAmount: true, discountAmount: true },
+    }),
+    findAllById(prisma.saleItem, {
+      where: { sale: { createdAt: { gte: from, lte: to }, status: { not: "CANCELLED" } } },
+      select: { id: true, quantity: true, unitPrice: true, costPriceAtSale: true },
+    }),
+  ]);
+  const netRevenueCents = sales.reduce(
+    (total, sale) => total + moneyToCents(sale.totalAmount.toFixed(2)),
+    0n
+  );
+  const discountCents = sales.reduce(
+    (total, sale) => total + moneyToCents(sale.discountAmount.toFixed(2)),
+    0n
+  );
+  const grossRevenueCents = netRevenueCents + discountCents;
+  let costOfGoodsCents = 0n;
+  let missingCostUnits = 0;
+  for (const item of items) {
+    if (item.costPriceAtSale === null) {
+      missingCostUnits += item.quantity;
+      continue;
+    }
+    costOfGoodsCents += moneyToCents(item.costPriceAtSale.toFixed(2)) * BigInt(item.quantity);
+  }
+  const grossProfitCents = netRevenueCents - costOfGoodsCents;
+  return res.json({
+    success: true,
+    data: {
+      range: { from, to },
+      sales: sales.length,
+      units: items.reduce((sum, item) => sum + item.quantity, 0),
+      grossRevenue: centsToMoney(grossRevenueCents),
+      discounts: centsToMoney(discountCents),
+      netRevenue: centsToMoney(netRevenueCents),
+      costOfGoods: centsToMoney(costOfGoodsCents),
+      grossProfit: centsToMoney(grossProfitCents),
+      grossMarginPercent: percentage(grossProfitCents, netRevenueCents),
+      missingCostUnits,
+      note: "Operating expenses are not stored in StockFlow; this report shows sales less tracked cost of goods.",
+    },
+  });
+}
+
+async function getValuationReport(req, res) {
+  const inventory = await prisma.inventory.findMany({
+    where: { product: { isActive: true } },
+    include: {
+      product: {
+        select: {
+          id: true,
+          sku: true,
+          name: true,
+          length: true,
+          width: true,
+          thickness: true,
+          costPrice: true,
+        },
+      },
+    },
+    orderBy: { product: { name: "asc" } },
+  });
+  let trackedValueCents = 0n;
+  let missingCostUnits = 0;
+  const products = inventory.map((record) => {
+    const costCents = record.product.costPrice
+      ? moneyToCents(record.product.costPrice.toFixed(2))
+      : null;
+    const valueCents = costCents === null ? null : costCents * BigInt(record.quantity);
+    if (valueCents === null) missingCostUnits += record.quantity;
+    else trackedValueCents += valueCents;
+    return {
+      product: record.product,
+      quantity: record.quantity,
+      reservedQuantity: record.reservedQuantity,
+      availableQuantity: record.quantity - record.reservedQuantity,
+      value: valueCents === null ? null : centsToMoney(valueCents),
+    };
+  });
+  return res.json({
+    success: true,
+    data: {
+      asOf: new Date(),
+      physicalUnits: inventory.reduce((sum, record) => sum + record.quantity, 0),
+      trackedValue: centsToMoney(trackedValueCents),
+      missingCostUnits,
+      products,
+    },
+  });
+}
+
 module.exports = {
   getDashboard,
   getSalesReport,
   getPaymentReport,
   getProfitReport,
   getLowStockAlerts,
+  getTopSellingReport,
+  getDeadStockReport,
+  getProfitLossReport,
+  getValuationReport,
 };

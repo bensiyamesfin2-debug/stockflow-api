@@ -5,6 +5,7 @@ const { moneyToCents, centsToMoney } = require("../utils/money");
 const { runSerializableTransaction } = require("../utils/transaction");
 const { normalizeClientRequestId } = require("../utils/clientRequestId");
 const { sellableUnitPriceCents } = require("../utils/salePricing");
+const { calculateDiscountCents } = require("../utils/discounts");
 const { buildSaleNotification } = require("../utils/saleNotification");
 const {
   sendNewSalePushNotification,
@@ -46,6 +47,15 @@ const saleInclude = {
     },
   },
   payments: true,
+  customer: {
+    select: { id: true, name: true, phone: true, email: true },
+  },
+  discount: {
+    select: { id: true, code: true, name: true, type: true, value: true },
+  },
+  shift: {
+    select: { id: true, status: true, openedAt: true, closedAt: true },
+  },
   releases: {
     select: {
       id: true,
@@ -81,6 +91,15 @@ function validateSaleRequest(body) {
   const payments = [];
   const productIds = new Set();
   const clientRequestId = normalizeClientRequestId(body.clientRequestId);
+  const customerId =
+    body.customerId === undefined || body.customerId === null || body.customerId === ""
+      ? null
+      : Number(body.customerId);
+  const discountId =
+    body.discountId === undefined || body.discountId === null || body.discountId === ""
+      ? null
+      : Number(body.discountId);
+  const discountCode = String(body.discountCode || "").trim().toUpperCase() || null;
 
   if (clientRequestId === undefined) {
     errors.push("The sale synchronization ID is invalid");
@@ -88,6 +107,15 @@ function validateSaleRequest(body) {
 
   if (customerName && customerName.length > 150) {
     errors.push("Customer name cannot exceed 150 characters");
+  }
+  if (customerId !== null && (!Number.isInteger(customerId) || customerId <= 0)) {
+    errors.push("Customer ID is invalid");
+  }
+  if (discountId !== null && (!Number.isInteger(discountId) || discountId <= 0)) {
+    errors.push("Discount ID is invalid");
+  }
+  if (discountId !== null && discountCode) {
+    errors.push("Provide either a discount ID or discount code, not both");
   }
 
   if (!Array.isArray(rawItems) || rawItems.length === 0) {
@@ -179,7 +207,15 @@ function validateSaleRequest(body) {
   }
 
   return {
-    data: { customerName, items, payments, clientRequestId: clientRequestId || null },
+    data: {
+      customerName,
+      customerId,
+      discountId,
+      discountCode,
+      items,
+      payments,
+      clientRequestId: clientRequestId || null,
+    },
     errors,
   };
 }
@@ -220,7 +256,7 @@ async function createSale(req, res) {
     }
 
     const productsById = new Map(products.map((product) => [product.id, product]));
-    let totalCents = 0n;
+    let subtotalCents = 0n;
 
     for (const item of data.items) {
       const product = productsById.get(item.productId);
@@ -251,8 +287,30 @@ async function createSale(req, res) {
         );
       }
 
-      totalCents += sellableUnitPriceCents(product) * BigInt(item.quantity);
+      subtotalCents += sellableUnitPriceCents(product) * BigInt(item.quantity);
     }
+
+    let customer = null;
+    if (data.customerId !== null) {
+      customer = await transaction.customer.findUnique({ where: { id: data.customerId } });
+      if (!customer || !customer.isActive) {
+        throw new HttpError(400, "Customer does not exist or is inactive");
+      }
+    }
+
+    let discount = null;
+    if (data.discountId !== null || data.discountCode) {
+      discount = await transaction.discount.findUnique({
+        where: data.discountId !== null
+          ? { id: data.discountId }
+          : { code: data.discountCode },
+      });
+      if (!discount) throw new HttpError(400, "Discount does not exist");
+    }
+    const discountCents = discount
+      ? calculateDiscountCents(discount, subtotalCents)
+      : 0n;
+    const totalCents = subtotalCents - discountCents;
 
     const paymentTotalCents = data.payments.reduce(
       (total, payment) => total + (payment.amountCents || 0n),
@@ -270,15 +328,32 @@ async function createSale(req, res) {
       );
     }
 
+    const activeShift = await transaction.shift.findFirst({
+      where: { userId: req.user.id, status: "OPEN" },
+      orderBy: { openedAt: "desc" },
+      select: { id: true },
+    });
+
     const createdSale = await transaction.sale.create({
       data: {
         saleNumber: makeSaleNumber(),
         clientRequestId: data.clientRequestId,
         cashierId: req.user.id,
-        customerName: data.customerName,
+        customerId: customer?.id || null,
+        customerName: customer?.name || data.customerName,
+        discountId: discount?.id || null,
+        discountAmount: centsToMoney(discountCents),
+        shiftId: activeShift?.id || null,
         totalAmount: centsToMoney(totalCents),
       },
     });
+
+    if (discount) {
+      await transaction.discount.update({
+        where: { id: discount.id },
+        data: { usageCount: { increment: 1 } },
+      });
+    }
 
     for (const item of data.items) {
       const product = productsById.get(item.productId);
@@ -348,6 +423,10 @@ async function createSale(req, res) {
           itemCount: data.items.length,
           notifiedInventoryStaff: inventoryStaff.length,
           paymentMethods: data.payments.map((payment) => payment.paymentMethod),
+          customerId: customer?.id || null,
+          discountId: discount?.id || null,
+          discountAmount: centsToMoney(discountCents),
+          shiftId: activeShift?.id || null,
         },
       },
     });
@@ -453,7 +532,7 @@ async function updateSale(req, res) {
     const currentQuantityByProduct = new Map(
       existingSale.items.map((item) => [item.productId, item.quantity])
     );
-    let totalCents = 0n;
+    let subtotalCents = 0n;
 
     for (const item of data.items) {
       const product = productsById.get(item.productId);
@@ -489,8 +568,35 @@ async function updateSale(req, res) {
         );
       }
 
-      totalCents += sellableUnitPriceCents(product) * BigInt(item.quantity);
+      subtotalCents += sellableUnitPriceCents(product) * BigInt(item.quantity);
     }
+
+    let customer = null;
+    if (data.customerId !== null) {
+      customer = await transaction.customer.findUnique({ where: { id: data.customerId } });
+      if (!customer || !customer.isActive) {
+        throw new HttpError(400, "Customer does not exist or is inactive");
+      }
+    }
+
+    let discount = null;
+    if (data.discountId !== null || data.discountCode) {
+      discount = await transaction.discount.findUnique({
+        where: data.discountId !== null
+          ? { id: data.discountId }
+          : { code: data.discountCode },
+      });
+      if (!discount) throw new HttpError(400, "Discount does not exist");
+    }
+    const discountCents = discount
+      ? calculateDiscountCents(
+          discount.id === existingSale.discountId
+            ? { ...discount, usageCount: Math.max(0, discount.usageCount - 1) }
+            : discount,
+          subtotalCents
+        )
+      : 0n;
+    const totalCents = subtotalCents - discountCents;
 
     const paymentTotalCents = data.payments.reduce(
       (total, payment) => total + (payment.amountCents || 0n),
@@ -558,10 +664,26 @@ async function updateSale(req, res) {
     await transaction.sale.update({
       where: { id: saleId },
       data: {
-        customerName: data.customerName,
+        customerId: customer?.id || null,
+        customerName: customer?.name || data.customerName,
+        discountId: discount?.id || null,
+        discountAmount: centsToMoney(discountCents),
         totalAmount: centsToMoney(totalCents),
       },
     });
+
+    if (existingSale.discountId && existingSale.discountId !== discount?.id) {
+      await transaction.discount.update({
+        where: { id: existingSale.discountId },
+        data: { usageCount: { decrement: 1 } },
+      });
+    }
+    if (discount && discount.id !== existingSale.discountId) {
+      await transaction.discount.update({
+        where: { id: discount.id },
+        data: { usageCount: { increment: 1 } },
+      });
+    }
 
     await transaction.auditLog.create({
       data: {
@@ -575,6 +697,9 @@ async function updateSale(req, res) {
           paymentMethods: data.payments.map(
             (payment) => payment.paymentMethod
           ),
+          customerId: customer?.id || null,
+          discountId: discount?.id || null,
+          discountAmount: centsToMoney(discountCents),
         },
       },
     });
@@ -703,6 +828,13 @@ async function cancelSale(req, res) {
       where: { saleId },
       data: { status: "VOIDED" },
     });
+
+    if (existingSale.discountId) {
+      await transaction.discount.updateMany({
+        where: { id: existingSale.discountId, usageCount: { gt: 0 } },
+        data: { usageCount: { decrement: 1 } },
+      });
+    }
 
     await transaction.sale.update({
       where: { id: saleId },

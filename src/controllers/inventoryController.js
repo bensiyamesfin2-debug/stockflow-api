@@ -10,6 +10,10 @@ function makeReceiptNumber() {
 
 function validateReceipt(body) {
   const supplierName = String(body.supplierName || "").trim() || null;
+  const supplierId =
+    body.supplierId === undefined || body.supplierId === null || body.supplierId === ""
+      ? null
+      : Number(body.supplierId);
   const referenceNumber = String(body.referenceNumber || "").trim() || null;
   const notes = String(body.notes || "").trim() || null;
   const rawItems = body.items;
@@ -17,6 +21,9 @@ function validateReceipt(body) {
 
   if (supplierName && supplierName.length > 150) {
     errors.push("Supplier name cannot exceed 150 characters");
+  }
+  if (supplierId !== null && (!Number.isInteger(supplierId) || supplierId <= 0)) {
+    errors.push("Supplier ID is invalid");
   }
 
   if (referenceNumber && referenceNumber.length > 150) {
@@ -67,7 +74,7 @@ function validateReceipt(body) {
   }
 
   return {
-    data: { supplierName, referenceNumber, notes, items },
+    data: { supplierId, supplierName, referenceNumber, notes, items },
     errors,
   };
 }
@@ -127,10 +134,15 @@ async function createStockReceipt(req, res) {
     return res.status(400).json({ success: false, message: errors[0], errors });
   }
 
-  const products = await prisma.product.findMany({
-    where: { id: { in: data.items.map((item) => item.productId) } },
-    select: { id: true, isActive: true },
-  });
+  const [products, supplier] = await Promise.all([
+    prisma.product.findMany({
+      where: { id: { in: data.items.map((item) => item.productId) } },
+      select: { id: true, isActive: true },
+    }),
+    data.supplierId
+      ? prisma.supplier.findUnique({ where: { id: data.supplierId } })
+      : Promise.resolve(null),
+  ]);
 
   if (products.length !== data.items.length) {
     return res.status(400).json({
@@ -145,12 +157,19 @@ async function createStockReceipt(req, res) {
       message: "Stock cannot be received for an inactive product",
     });
   }
+  if (data.supplierId && (!supplier || !supplier.isActive)) {
+    return res.status(400).json({
+      success: false,
+      message: "Supplier does not exist or is inactive",
+    });
+  }
 
   const receipt = await runSerializableTransaction(async (transaction) => {
     const createdReceipt = await transaction.stockReceipt.create({
       data: {
         receiptNumber: makeReceiptNumber(),
-        supplierName: data.supplierName,
+        supplierId: supplier?.id || null,
+        supplierName: supplier?.name || data.supplierName,
         referenceNumber: data.referenceNumber,
         notes: data.notes,
         receivedById: req.user.id,
@@ -217,6 +236,7 @@ async function createStockReceipt(req, res) {
         receivedBy: {
           select: { id: true, fullName: true, username: true },
         },
+        supplier: true,
         items: {
           include: {
             product: {
@@ -247,6 +267,7 @@ async function listStockReceipts(req, res) {
     take: 100,
     include: {
       receivedBy: { select: { id: true, fullName: true, username: true } },
+      supplier: true,
       items: {
         include: {
           product: {

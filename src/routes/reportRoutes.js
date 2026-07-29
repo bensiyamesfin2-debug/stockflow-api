@@ -5,6 +5,10 @@ const {
   getPaymentReport,
   getProfitReport,
   getLowStockAlerts,
+  getTopSellingReport,
+  getDeadStockReport,
+  getProfitLossReport,
+  getValuationReport,
 } = require("../controllers/reportController");
 const { authenticate, authorizeRoles } = require("../middleware/auth");
 
@@ -25,5 +29,9 @@ router.get(
   authorizeRoles("ADMIN"),
   getPaymentReport
 );
+router.get("/top-selling", authenticate, authorizeRoles("ADMIN"), getTopSellingReport);
+router.get("/dead-stock", authenticate, authorizeRoles("ADMIN"), getDeadStockReport);
+router.get("/profit-loss", authenticate, authorizeRoles("ADMIN"), getProfitLossReport);
+router.get("/valuation", authenticate, authorizeRoles("ADMIN"), getValuationReport);
 
 module.exports = router;

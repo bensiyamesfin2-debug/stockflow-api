@@ -135,6 +135,19 @@ function validateProductInput(body, partial = false) {
     }
   }
 
+  if (body.categoryId !== undefined) {
+    if (body.categoryId === null || body.categoryId === "") {
+      data.categoryId = null;
+    } else {
+      const categoryId = Number(body.categoryId);
+      if (!Number.isInteger(categoryId) || categoryId <= 0) {
+        errors.push("Category ID is invalid");
+      } else {
+        data.categoryId = categoryId;
+      }
+    }
+  }
+
   let reorderLevel;
   if (!partial || body.reorderLevel !== undefined) {
     reorderLevel = Number(body.reorderLevel ?? 5);
@@ -155,6 +168,13 @@ async function createProduct(req, res) {
 
   if (req.user.role === "INVENTORY_STAFF") {
     data.sellingPrice = "0";
+  }
+
+  if (data.categoryId !== undefined && data.categoryId !== null) {
+    const category = await prisma.category.findUnique({ where: { id: data.categoryId } });
+    if (!category || !category.isActive) {
+      return res.status(400).json({ success: false, message: "Category does not exist or is inactive" });
+    }
   }
 
   data.sku = makeInternalSku(
@@ -184,14 +204,14 @@ async function createProduct(req, res) {
         ? await transaction.product.update({
             where: { id: existingProduct.id },
             data: { ...data, isActive: true },
-            include: { inventory: true },
+            include: { inventory: true, category: true },
           })
         : await transaction.product.create({
             data: {
               ...data,
               inventory: { create: { quantity: 0, reorderLevel } },
             },
-            include: { inventory: true },
+            include: { inventory: true, category: true },
           });
 
       if (existingProduct) {
@@ -264,7 +284,7 @@ async function listProducts(req, res) {
 
   const products = await prisma.product.findMany({
     where,
-    include: { inventory: true },
+    include: { inventory: true, category: true },
     orderBy: [
       { name: "asc" },
       { thickness: "desc" },
@@ -288,7 +308,7 @@ async function getProduct(req, res) {
 
   const product = await prisma.product.findUnique({
     where: { id: productId },
-    include: { inventory: true },
+    include: { inventory: true, category: true },
   });
 
   if (!product || (req.user.role !== "ADMIN" && !product.isActive)) {
@@ -327,6 +347,13 @@ async function updateProduct(req, res) {
 
   if (!existingProduct) {
     return res.status(404).json({ success: false, message: "Product not found" });
+  }
+
+  if (data.categoryId !== undefined && data.categoryId !== null) {
+    const category = await prisma.category.findUnique({ where: { id: data.categoryId } });
+    if (!category || !category.isActive) {
+      return res.status(400).json({ success: false, message: "Category does not exist or is inactive" });
+    }
   }
 
   const nextName = data.name ?? existingProduct.name;
@@ -388,7 +415,7 @@ async function updateProduct(req, res) {
 
       return transaction.product.findUnique({
         where: { id: productId },
-        include: { inventory: true },
+        include: { inventory: true, category: true },
       });
     });
 

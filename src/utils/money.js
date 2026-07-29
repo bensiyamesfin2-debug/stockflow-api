@@ -12,9 +12,11 @@ function moneyToCents(value) {
 }
 
 function centsToMoney(cents) {
-  const whole = cents / 100n;
-  const fraction = String(cents % 100n).padStart(2, "0");
-  return `${whole}.${fraction}`;
+  const negative = cents < 0n;
+  const absolute = negative ? -cents : cents;
+  const whole = absolute / 100n;
+  const fraction = String(absolute % 100n).padStart(2, "0");
+  return `${negative ? "-" : ""}${whole}.${fraction}`;
 }
 
 module.exports = {

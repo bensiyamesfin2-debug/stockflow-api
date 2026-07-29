@@ -12,7 +12,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
-    "check": "node --check src/server.js && node --check src/app.js && node --check src/controllers/reportController.js && node --check src/controllers/securityController.js && node --check src/controllers/authController.js && node --check src/controllers/saleController.js && node --check src/controllers/productController.js && node --check src/controllers/inventoryController.js && node --check src/controllers/releaseController.js && node --check src/controllers/userController.js && node --check src/controllers/notificationController.js && node --check src/controllers/leadController.js && node --check src/routes/notificationRoutes.js && node --check src/routes/leadRoutes.js && node --check src/utils/dashboardSaleInclude.js && node --check src/utils/salePricing.js && node --check src/utils/customOrder.js && node --check src/utils/releasePrivacy.js && node --check src/utils/loginPairing.js && node --check src/utils/clientRequestId.js && node --check src/utils/saleNotification.js && node --check src/utils/pushNotifications.js && node --check src/utils/productCatalog.js && node --check src/utils/salesLead.js",
+    "check": "node --check src/server.js && node --check src/app.js && node --check src/controllers/reportController.js && node --check src/controllers/securityController.js && node --check src/controllers/authController.js && node --check src/controllers/saleController.js && node --check src/controllers/productController.js && node --check src/controllers/inventoryController.js && node --check src/controllers/releaseController.js && node --check src/controllers/userController.js && node --check src/controllers/notificationController.js && node --check src/controllers/leadController.js && node --check src/controllers/categoryController.js && node --check src/controllers/supplierController.js && node --check src/controllers/customerController.js && node --check src/controllers/purchaseOrderController.js && node --check src/controllers/stockCountController.js && node --check src/controllers/discountController.js && node --check src/controllers/shiftController.js && node --check src/controllers/exportController.js && node --check src/routes/notificationRoutes.js && node --check src/routes/leadRoutes.js && node --check src/routes/categoryRoutes.js && node --check src/routes/supplierRoutes.js && node --check src/routes/customerRoutes.js && node --check src/routes/purchaseOrderRoutes.js && node --check src/routes/stockCountRoutes.js && node --check src/routes/discountRoutes.js && node --check src/routes/shiftRoutes.js && node --check src/routes/exportRoutes.js && node --check src/utils/dashboardSaleInclude.js && node --check src/utils/salePricing.js && node --check src/utils/customOrder.js && node --check src/utils/releasePrivacy.js && node --check src/utils/loginPairing.js && node --check src/utils/clientRequestId.js && node --check src/utils/saleNotification.js && node --check src/utils/pushNotifications.js && node --check src/utils/productCatalog.js && node --check src/utils/salesLead.js && node --check src/utils/discounts.js",
     "test": "node --test"
   },
   "engines": {
@@ -23,10 +23,11 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@prisma/adapter-pg": "^7.9.0",
-    "@prisma/client": "^7.9.0",
+    "@prisma/adapter-pg": "^7.9.1",
+    "@prisma/client": "^7.9.1",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
+    "csv-writer": "^1.6.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
@@ -36,6 +37,6 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.14",
-    "prisma": "^7.9.0"
+    "prisma": "^7.9.1"
   }
 }

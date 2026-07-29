@@ -41,29 +41,58 @@ enum InventoryMovementType {
   ADJUSTMENT_OUT
 }
 
+enum PurchaseOrderStatus {
+  DRAFT
+  ORDERED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+enum StockCountStatus {
+  DRAFT
+  COMPLETED
+  ADJUSTED
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+}
+
+enum ShiftStatus {
+  OPEN
+  CLOSED
+}
+
 model User {
-  id                  Int                 @id @default(autoincrement())
-  fullName            String              @map("full_name") @db.VarChar(150)
-  username            String              @unique @db.VarChar(100)
-  passwordHash        String              @map("password_hash")
-  role                UserRole
-  isActive            Boolean             @default(true) @map("is_active")
-  failedLoginAttempts Int                 @default(0) @map("failed_login_attempts")
-  lockedUntil         DateTime?           @map("locked_until") @db.Timestamptz(3)
-  lastLoginAt         DateTime?           @map("last_login_at") @db.Timestamptz(3)
-  passwordChangedAt   DateTime            @default(now()) @map("password_changed_at") @db.Timestamptz(3)
-  tokenVersion        Int                 @default(0) @map("token_version")
-  createdAt           DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt           DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
-  sales               Sale[]              @relation("CashierSales")
-  paymentsRecorded    Payment[]           @relation("RecordedPayments")
-  inventoryReleases   InventoryRelease[]  @relation("ReleasedBy")
-  stockReceipts       StockReceipt[]      @relation("ReceivedBy")
-  inventoryMovements  InventoryMovement[] @relation("MovementCreatedBy")
-  auditLogs           AuditLog[]          @relation("UserAuditLogs")
-  loginPairings       LoginPairing[]
-  notifications       Notification[]
-  pushSubscriptions   PushSubscription[]
+  id                   Int                 @id @default(autoincrement())
+  fullName             String              @map("full_name") @db.VarChar(150)
+  username             String              @unique @db.VarChar(100)
+  passwordHash         String              @map("password_hash")
+  role                 UserRole
+  isActive             Boolean             @default(true) @map("is_active")
+  failedLoginAttempts  Int                 @default(0) @map("failed_login_attempts")
+  lockedUntil          DateTime?           @map("locked_until") @db.Timestamptz(3)
+  lastLoginAt          DateTime?           @map("last_login_at") @db.Timestamptz(3)
+  passwordChangedAt    DateTime            @default(now()) @map("password_changed_at") @db.Timestamptz(3)
+  tokenVersion         Int                 @default(0) @map("token_version")
+  createdAt            DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+  sales                Sale[]              @relation("CashierSales")
+  paymentsRecorded     Payment[]           @relation("RecordedPayments")
+  inventoryReleases    InventoryRelease[]  @relation("ReleasedBy")
+  stockReceipts        StockReceipt[]      @relation("ReceivedBy")
+  inventoryMovements   InventoryMovement[] @relation("MovementCreatedBy")
+  auditLogs            AuditLog[]          @relation("UserAuditLogs")
+  loginPairings        LoginPairing[]
+  notifications        Notification[]
+  pushSubscriptions    PushSubscription[]
+  purchaseOrders       PurchaseOrder[]     @relation("PurchaseOrdersCreated")
+  stockCountsCreated   StockCount[]        @relation("StockCountsCreated")
+  stockCountsCompleted StockCount[]        @relation("StockCountsCompleted")
+  stockCountsAdjusted  StockCount[]        @relation("StockCountsAdjusted")
+  shifts               Shift[]
 
   @@map("users")
 }
@@ -92,6 +121,7 @@ model Product {
   description        String?
   sellingPrice       Decimal             @map("selling_price") @db.Decimal(12, 2)
   costPrice          Decimal?            @map("cost_price") @db.Decimal(12, 2)
+  categoryId         Int?                @map("category_id")
   isActive           Boolean             @default(true) @map("is_active")
   createdAt          DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt          DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -99,7 +129,11 @@ model Product {
   saleItems          SaleItem[]
   stockReceiptItems  StockReceiptItem[]
   inventoryMovements InventoryMovement[]
+  category           Category?           @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  purchaseOrderItems PurchaseOrderItem[]
+  stockCountItems    StockCountItem[]
 
+  @@index([categoryId])
   @@map("products")
 }
 
@@ -120,7 +154,11 @@ model Sale {
   saleNumber         String             @unique @map("sale_number") @db.VarChar(50)
   clientRequestId    String?            @unique @map("client_request_id") @db.Uuid
   cashierId          Int                @map("cashier_id")
+  customerId         Int?               @map("customer_id")
+  discountId         Int?               @map("discount_id")
+  shiftId            Int?               @map("shift_id")
   customerName       String?            @map("customer_name") @db.VarChar(150)
+  discountAmount     Decimal            @default(0) @map("discount_amount") @db.Decimal(12, 2)
   totalAmount        Decimal            @map("total_amount") @db.Decimal(12, 2)
   status             SaleStatus         @default(PENDING_RELEASE)
   createdAt          DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
@@ -133,8 +171,14 @@ model Sale {
   payments           Payment[]
   releases           InventoryRelease[]
   notifications      Notification[]
+  customer           Customer?          @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  discount           Discount?          @relation(fields: [discountId], references: [id], onDelete: SetNull)
+  shift              Shift?             @relation(fields: [shiftId], references: [id], onDelete: SetNull)
 
   @@index([cashierId])
+  @@index([customerId])
+  @@index([discountId])
+  @@index([shiftId])
   @@index([status, createdAt])
   @@map("sales")
 }
@@ -211,14 +255,20 @@ model StockReceipt {
   id              Int                @id @default(autoincrement())
   receiptNumber   String             @unique @map("receipt_number") @db.VarChar(50)
   supplierName    String?            @map("supplier_name") @db.VarChar(150)
+  supplierId      Int?               @map("supplier_id")
+  purchaseOrderId Int?               @map("purchase_order_id")
   referenceNumber String?            @map("reference_number") @db.VarChar(150)
   receivedById    Int                @map("received_by_id")
   notes           String?
   createdAt       DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
   receivedBy      User               @relation("ReceivedBy", fields: [receivedById], references: [id], onDelete: Restrict)
   items           StockReceiptItem[]
+  supplier        Supplier?          @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  purchaseOrder   PurchaseOrder?     @relation(fields: [purchaseOrderId], references: [id], onDelete: SetNull)
 
   @@index([receivedById, createdAt])
+  @@index([supplierId])
+  @@index([purchaseOrderId])
   @@map("stock_receipts")
 }
 
@@ -316,4 +366,159 @@ model SalesLead {
 
   @@index([status, createdAt])
   @@map("sales_leads")
+}
+
+model Category {
+  id          Int       @id @default(autoincrement())
+  name        String    @unique @db.VarChar(120)
+  description String?
+  isActive    Boolean   @default(true) @map("is_active")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  products    Product[]
+
+  @@map("categories")
+}
+
+model Supplier {
+  id             Int             @id @default(autoincrement())
+  name           String          @unique @db.VarChar(150)
+  contactName    String?         @map("contact_name") @db.VarChar(150)
+  phone          String?         @db.VarChar(40)
+  email          String?         @db.VarChar(254)
+  address        String?
+  isActive       Boolean         @default(true) @map("is_active")
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  purchaseOrders PurchaseOrder[]
+  stockReceipts  StockReceipt[]
+
+  @@map("suppliers")
+}
+
+model Customer {
+  id        Int      @id @default(autoincrement())
+  name      String   @db.VarChar(150)
+  phone     String?  @db.VarChar(40)
+  email     String?  @db.VarChar(254)
+  address   String?
+  notes     String?
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  sales     Sale[]
+
+  @@index([name])
+  @@index([phone])
+  @@map("customers")
+}
+
+model PurchaseOrder {
+  id          Int                 @id @default(autoincrement())
+  orderNumber String              @unique @map("order_number") @db.VarChar(50)
+  supplierId  Int                 @map("supplier_id")
+  createdById Int                 @map("created_by_id")
+  status      PurchaseOrderStatus @default(DRAFT)
+  expectedAt  DateTime?           @map("expected_at") @db.Timestamptz(3)
+  notes       String?
+  createdAt   DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+  cancelledAt DateTime?           @map("cancelled_at") @db.Timestamptz(3)
+  supplier    Supplier            @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  createdBy   User                @relation("PurchaseOrdersCreated", fields: [createdById], references: [id], onDelete: Restrict)
+  items       PurchaseOrderItem[]
+  receipts    StockReceipt[]
+
+  @@index([supplierId, createdAt])
+  @@index([status, createdAt])
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderItem {
+  id               Int           @id @default(autoincrement())
+  purchaseOrderId  Int           @map("purchase_order_id")
+  productId        Int           @map("product_id")
+  quantity         Int
+  receivedQuantity Int           @default(0) @map("received_quantity")
+  unitCost         Decimal       @map("unit_cost") @db.Decimal(12, 2)
+  purchaseOrder    PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  product          Product       @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@unique([purchaseOrderId, productId])
+  @@index([productId])
+  @@map("purchase_order_items")
+}
+
+model StockCount {
+  id            Int              @id @default(autoincrement())
+  countNumber   String           @unique @map("count_number") @db.VarChar(50)
+  status        StockCountStatus @default(DRAFT)
+  createdById   Int              @map("created_by_id")
+  completedById Int?             @map("completed_by_id")
+  adjustedById  Int?             @map("adjusted_by_id")
+  notes         String?
+  createdAt     DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  completedAt   DateTime?        @map("completed_at") @db.Timestamptz(3)
+  adjustedAt    DateTime?        @map("adjusted_at") @db.Timestamptz(3)
+  createdBy     User             @relation("StockCountsCreated", fields: [createdById], references: [id], onDelete: Restrict)
+  completedBy   User?            @relation("StockCountsCompleted", fields: [completedById], references: [id], onDelete: Restrict)
+  adjustedBy    User?            @relation("StockCountsAdjusted", fields: [adjustedById], references: [id], onDelete: Restrict)
+  items         StockCountItem[]
+
+  @@index([status, createdAt])
+  @@map("stock_counts")
+}
+
+model StockCountItem {
+  id                 Int        @id @default(autoincrement())
+  stockCountId       Int        @map("stock_count_id")
+  productId          Int        @map("product_id")
+  expectedQuantity   Int        @map("expected_quantity")
+  countedQuantity    Int?       @map("counted_quantity")
+  adjustmentQuantity Int?       @map("adjustment_quantity")
+  stockCount         StockCount @relation(fields: [stockCountId], references: [id], onDelete: Cascade)
+  product            Product    @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@unique([stockCountId, productId])
+  @@index([productId])
+  @@map("stock_count_items")
+}
+
+model Discount {
+  id              Int          @id @default(autoincrement())
+  code            String       @unique @db.VarChar(50)
+  name            String       @db.VarChar(150)
+  type            DiscountType
+  value           Decimal      @db.Decimal(12, 2)
+  minimumAmount   Decimal?     @map("minimum_amount") @db.Decimal(12, 2)
+  maximumDiscount Decimal?     @map("maximum_discount") @db.Decimal(12, 2)
+  startsAt        DateTime?    @map("starts_at") @db.Timestamptz(3)
+  endsAt          DateTime?    @map("ends_at") @db.Timestamptz(3)
+  usageLimit      Int?         @map("usage_limit")
+  usageCount      Int          @default(0) @map("usage_count")
+  isActive        Boolean      @default(true) @map("is_active")
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+  sales           Sale[]
+
+  @@index([isActive, startsAt, endsAt])
+  @@map("discounts")
+}
+
+model Shift {
+  id           Int         @id @default(autoincrement())
+  userId       Int         @map("user_id")
+  status       ShiftStatus @default(OPEN)
+  openingCash  Decimal     @default(0) @map("opening_cash") @db.Decimal(12, 2)
+  closingCash  Decimal?    @map("closing_cash") @db.Decimal(12, 2)
+  expectedCash Decimal?    @map("expected_cash") @db.Decimal(12, 2)
+  notes        String?
+  openedAt     DateTime    @default(now()) @map("opened_at") @db.Timestamptz(3)
+  closedAt     DateTime?   @map("closed_at") @db.Timestamptz(3)
+  user         User        @relation(fields: [userId], references: [id], onDelete: Restrict)
+  sales        Sale[]
+
+  @@index([userId, status])
+  @@index([openedAt])
+  @@map("shifts")
 }

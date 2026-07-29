@@ -77,6 +77,15 @@ async function createEncryptedBackup(req, res) {
         inventoryMovements,
         auditLogs,
         salesLeads,
+        categories,
+        suppliers,
+        customers,
+        purchaseOrders,
+        purchaseOrderItems,
+        stockCounts,
+        stockCountItems,
+        discounts,
+        shifts,
       ] = await Promise.all([
         transaction.user.findMany({ orderBy: { id: "asc" } }),
         transaction.product.findMany({ orderBy: { id: "asc" } }),
@@ -91,6 +100,15 @@ async function createEncryptedBackup(req, res) {
         transaction.inventoryMovement.findMany({ orderBy: { id: "asc" } }),
         transaction.auditLog.findMany({ orderBy: { id: "asc" } }),
         transaction.salesLead.findMany({ orderBy: { id: "asc" } }),
+        transaction.category.findMany({ orderBy: { id: "asc" } }),
+        transaction.supplier.findMany({ orderBy: { id: "asc" } }),
+        transaction.customer.findMany({ orderBy: { id: "asc" } }),
+        transaction.purchaseOrder.findMany({ orderBy: { id: "asc" } }),
+        transaction.purchaseOrderItem.findMany({ orderBy: { id: "asc" } }),
+        transaction.stockCount.findMany({ orderBy: { id: "asc" } }),
+        transaction.stockCountItem.findMany({ orderBy: { id: "asc" } }),
+        transaction.discount.findMany({ orderBy: { id: "asc" } }),
+        transaction.shift.findMany({ orderBy: { id: "asc" } }),
       ]);
 
       return {
@@ -107,6 +125,15 @@ async function createEncryptedBackup(req, res) {
         inventoryMovements,
         auditLogs,
         salesLeads,
+        categories,
+        suppliers,
+        customers,
+        purchaseOrders,
+        purchaseOrderItems,
+        stockCounts,
+        stockCountItems,
+        discounts,
+        shifts,
       };
     },
     {
@@ -120,7 +147,7 @@ async function createEncryptedBackup(req, res) {
     Object.entries(data).map(([name, rows]) => [name, rows.length])
   );
   const payload = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     application: "StockFlow",
     exportedAt: new Date().toISOString(),
     recordCounts,
