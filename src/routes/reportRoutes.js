@@ -2,6 +2,7 @@ const express = require("express");
 const {
   getDashboard,
   getLiveSalesSummary,
+  getCustomerBalances,
   getSalesReport,
   getPaymentReport,
   getProfitReport,
@@ -17,6 +18,7 @@ const router = express.Router();
 
 router.get("/dashboard", authenticate, getDashboard);
 router.get("/sales-summary", authenticate, authorizeRoles("ADMIN", "CASHIER"), getLiveSalesSummary);
+router.get("/customer-balances", authenticate, authorizeRoles("ADMIN", "CASHIER"), getCustomerBalances);
 router.get("/sales", authenticate, authorizeRoles("ADMIN"), getSalesReport);
 router.get("/profit", authenticate, authorizeRoles("ADMIN"), getProfitReport);
 router.get(

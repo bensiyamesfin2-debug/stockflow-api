@@ -56,6 +56,27 @@ function validateReleaseRequest(body) {
   return { data: { saleId, notes, items }, errors };
 }
 
+function validateDeliveryProof(body) {
+  const receiverName = String(body.receiverName || "").trim().replace(/\s+/g, " ");
+  const receiverPhone = String(body.receiverPhone || "").trim() || null;
+  const signatureName = String(body.signatureName || "").trim().replace(/\s+/g, " ") || null;
+  const photoName = String(body.photoName || "").trim() || null;
+  const photoMimeType = String(body.photoMimeType || "").trim() || null;
+  const photoContent = String(body.photoContent || "") || null;
+  const notes = String(body.notes || "").trim() || null;
+  const deliveredAt = body.deliveredAt ? new Date(body.deliveredAt) : new Date();
+  const errors = [];
+  if (receiverName.length < 2 || receiverName.length > 150) errors.push("Receiver name must be between 2 and 150 characters");
+  if (receiverPhone && receiverPhone.length > 40) errors.push("Receiver phone cannot exceed 40 characters");
+  if (signatureName && signatureName.length > 150) errors.push("Signature name cannot exceed 150 characters");
+  if (photoName && photoName.length > 180) errors.push("Photo name cannot exceed 180 characters");
+  if (photoMimeType && photoMimeType.length > 100) errors.push("Photo type cannot exceed 100 characters");
+  if (photoContent && photoContent.length > 500_000) errors.push("Delivery photo must be smaller than 350 KB");
+  if (notes && notes.length > 2000) errors.push("Delivery notes cannot exceed 2,000 characters");
+  if (Number.isNaN(deliveredAt.getTime())) errors.push("Delivery time is invalid");
+  return { data: { receiverName, receiverPhone, signatureName, photoName, photoMimeType, photoContent, notes, deliveredAt }, errors };
+}
+
 async function listPendingReleases(req, res) {
   const sales = await prisma.sale.findMany({
     where: {
@@ -77,6 +98,29 @@ async function listPendingReleases(req, res) {
   const pendingSales = sales.map(serializePendingReleaseSale);
 
   return res.json({ success: true, data: { sales: pendingSales } });
+}
+
+async function createDeliveryProof(req, res) {
+  const releaseId = Number(req.params.id);
+  const { data, errors } = validateDeliveryProof(req.body);
+  if (!Number.isInteger(releaseId) || releaseId <= 0) return res.status(400).json({ success: false, message: "Invalid release ID" });
+  if (errors.length) return res.status(400).json({ success: false, message: errors[0], errors });
+  try {
+    const proof = await runSerializableTransaction(async (transaction) => {
+      const release = await transaction.inventoryRelease.findUnique({ where: { id: releaseId } });
+      if (!release) throw new HttpError(404, "Release not found");
+      const created = await transaction.deliveryProof.create({
+        data: { releaseId, deliveredById: req.user.id, ...data },
+        include: { deliveredBy: { select: { id: true, fullName: true, username: true } }, release: { select: { id: true, releaseNumber: true, saleId: true } } },
+      });
+      await transaction.auditLog.create({ data: { userId: req.user.id, action: "CONFIRM_DELIVERY", entityType: "INVENTORY_RELEASE", entityId: releaseId, details: { releaseNumber: release.releaseNumber, receiverName: data.receiverName, hasPhoto: Boolean(data.photoContent) } } });
+      return created;
+    });
+    return res.status(201).json({ success: true, message: "Delivery proof saved", data: { proof } });
+  } catch (error) {
+    if (error.code === "P2002") return res.status(409).json({ success: false, message: "Delivery proof has already been recorded for this release" });
+    throw error;
+  }
 }
 
 async function createRelease(req, res) {
@@ -277,6 +321,7 @@ async function listReleases(req, res) {
     include: {
       releasedBy: { select: { id: true, fullName: true, username: true } },
       sale: { select: { id: true, saleNumber: true, status: true } },
+      deliveryProof: { select: { id: true, receiverName: true, receiverPhone: true, signatureName: true, photoName: true, photoMimeType: true, notes: true, deliveredAt: true, createdAt: true, deliveredBy: { select: { id: true, fullName: true, username: true } } } },
       items: {
         include: {
           saleItem: {
@@ -306,4 +351,5 @@ module.exports = {
   listPendingReleases,
   createRelease,
   listReleases,
+  createDeliveryProof,
 };

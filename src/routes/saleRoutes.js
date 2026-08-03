@@ -2,6 +2,7 @@ const express = require("express");
 const {
   createSale,
   updateSale,
+  recordCreditPayment,
   listSales,
   getSale,
   cancelSale,
@@ -14,6 +15,7 @@ router.use(authenticate);
 router.get("/", authorizeRoles("ADMIN", "CASHIER"), listSales);
 router.post("/", authorizeRoles("ADMIN", "CASHIER"), createSale);
 router.patch("/:id", authorizeRoles("ADMIN", "CASHIER"), updateSale);
+router.post("/:id/payments", authorizeRoles("ADMIN", "CASHIER"), recordCreditPayment);
 router.post(
   "/:id/cancel",
   authorizeRoles("ADMIN", "CASHIER"),

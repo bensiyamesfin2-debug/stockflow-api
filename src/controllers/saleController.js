@@ -108,6 +108,8 @@ function validateSaleRequest(body) {
       ? null
       : Number(body.discountId);
   const discountCode = String(body.discountCode || "").trim().toUpperCase() || null;
+  const allowCredit = Boolean(body.allowCredit);
+  const creditDueAt = body.creditDueAt ? new Date(body.creditDueAt) : null;
 
   if (clientRequestId === undefined) {
     errors.push("The sale synchronization ID is invalid");
@@ -124,6 +126,9 @@ function validateSaleRequest(body) {
   }
   if (discountId !== null && discountCode) {
     errors.push("Provide either a discount ID or discount code, not both");
+  }
+  if (body.creditDueAt && (!creditDueAt || Number.isNaN(creditDueAt.getTime()))) {
+    errors.push("Credit due date is invalid");
   }
 
   if (!Array.isArray(rawItems) || rawItems.length === 0) {
@@ -215,6 +220,8 @@ function validateSaleRequest(body) {
       customerId,
       discountId,
       discountCode,
+      allowCredit,
+      creditDueAt,
       items,
       payments,
       clientRequestId: clientRequestId || null,
@@ -358,15 +365,22 @@ async function createSale(req, res) {
       0n
     );
 
-    if (totalCents > 0n && data.payments.length === 0) {
+    if (totalCents > 0n && data.payments.length === 0 && !data.allowCredit) {
       throw new HttpError(400, "At least one payment is required");
     }
 
-    if (paymentTotalCents !== totalCents) {
+    if (paymentTotalCents > totalCents) {
       throw new HttpError(
         400,
-        `Payment total must equal the sale total of ${centsToMoney(totalCents)}`
+        `Payment total cannot exceed the sale total of ${centsToMoney(totalCents)}`
       );
+    }
+    const creditBalanceCents = totalCents - paymentTotalCents;
+    if (creditBalanceCents > 0n && (!data.allowCredit || !customer || !data.creditDueAt)) {
+      throw new HttpError(400, "A saved customer and due date are required when part of a sale is on credit");
+    }
+    if (!data.allowCredit && paymentTotalCents !== totalCents) {
+      throw new HttpError(400, `Payment total must equal the sale total of ${centsToMoney(totalCents)}`);
     }
 
     const activeShift = await transaction.shift.findFirst({
@@ -386,6 +400,8 @@ async function createSale(req, res) {
         discountAmount: centsToMoney(discountCents),
         shiftId: activeShift?.id || null,
         totalAmount: centsToMoney(totalCents),
+        creditBalance: centsToMoney(creditBalanceCents),
+        creditDueAt: creditBalanceCents > 0n ? data.creditDueAt : null,
       },
     });
 
@@ -468,6 +484,8 @@ async function createSale(req, res) {
           discountId: discount?.id || null,
           discountAmount: centsToMoney(discountCents),
           shiftId: activeShift?.id || null,
+          creditBalance: centsToMoney(creditBalanceCents),
+          creditDueAt: creditBalanceCents > 0n ? data.creditDueAt : null,
         },
       },
     });
@@ -631,15 +649,22 @@ async function updateSale(req, res) {
       0n
     );
 
-    if (totalCents > 0n && data.payments.length === 0) {
+    if (totalCents > 0n && data.payments.length === 0 && !data.allowCredit) {
       throw new HttpError(400, "At least one payment is required");
     }
 
-    if (paymentTotalCents !== totalCents) {
+    if (paymentTotalCents > totalCents) {
       throw new HttpError(
         400,
-        `Payment total must equal the order total of ${centsToMoney(totalCents)}`
+        `Payment total cannot exceed the order total of ${centsToMoney(totalCents)}`
       );
+    }
+    const creditBalanceCents = totalCents - paymentTotalCents;
+    if (creditBalanceCents > 0n && (!data.allowCredit || !customer || !data.creditDueAt)) {
+      throw new HttpError(400, "A saved customer and due date are required when part of an order is on credit");
+    }
+    if (!data.allowCredit && paymentTotalCents !== totalCents) {
+      throw new HttpError(400, `Payment total must equal the order total of ${centsToMoney(totalCents)}`);
     }
 
     for (const item of existingSale.items) {
@@ -697,6 +722,8 @@ async function updateSale(req, res) {
         discountId: discount?.id || null,
         discountAmount: centsToMoney(discountCents),
         totalAmount: centsToMoney(totalCents),
+        creditBalance: centsToMoney(creditBalanceCents),
+        creditDueAt: creditBalanceCents > 0n ? data.creditDueAt : null,
       },
     });
 
@@ -728,6 +755,8 @@ async function updateSale(req, res) {
           customerId: customer?.id || null,
           discountId: discount?.id || null,
           discountAmount: centsToMoney(discountCents),
+          creditBalance: centsToMoney(creditBalanceCents),
+          creditDueAt: creditBalanceCents > 0n ? data.creditDueAt : null,
         },
       },
     });
@@ -743,6 +772,45 @@ async function updateSale(req, res) {
     message: "Order updated and inventory reservations recalculated",
     data: { sale: serializeSale(sale) },
   });
+}
+
+async function recordCreditPayment(req, res) {
+  const saleId = Number(req.params.id);
+  const paymentMethod = String(req.body.paymentMethod || "").trim().toUpperCase();
+  const amountCents = moneyToCents(req.body.amount);
+  const bankName = String(req.body.bankName || "").trim() || null;
+  const transactionReference = String(req.body.transactionReference || "").trim() || null;
+  if (!Number.isInteger(saleId) || saleId <= 0 || !PAYMENT_METHODS.has(paymentMethod) || amountCents === null || amountCents <= 0n) {
+    return res.status(400).json({ success: false, message: "Enter a valid payment method and amount" });
+  }
+  if (bankName && bankName.length > 150) return res.status(400).json({ success: false, message: "Bank name cannot exceed 150 characters" });
+  if (transactionReference && transactionReference.length > 150) return res.status(400).json({ success: false, message: "Transaction reference cannot exceed 150 characters" });
+  if (paymentMethod === "BANK_TRANSFER" && !bankName) return res.status(400).json({ success: false, message: "Bank transfer requires a bank name" });
+  if (["BANK_TRANSFER", "MOBILE_MONEY", "CARD"].includes(paymentMethod) && !transactionReference) return res.status(400).json({ success: false, message: "This payment method requires a transaction reference" });
+
+  const sale = await runSerializableTransaction(async (transaction) => {
+    const existing = await transaction.sale.findUnique({ where: { id: saleId } });
+    if (!existing) throw new HttpError(404, "Sale not found");
+    if (req.user.role === "CASHIER" && existing.cashierId !== req.user.id) throw new HttpError(403, "You can only collect payment for your own order");
+    if (existing.status === "CANCELLED") throw new HttpError(409, "Payment cannot be collected for a cancelled sale");
+    const remainingCents = moneyToCents(existing.creditBalance.toFixed(2));
+    if (remainingCents <= 0n) throw new HttpError(409, "This sale has no outstanding credit balance");
+    if (amountCents > remainingCents) throw new HttpError(400, `Payment cannot exceed the outstanding balance of ${centsToMoney(remainingCents)}`);
+    await transaction.payment.create({
+      data: {
+        saleId,
+        paymentMethod,
+        bankName: paymentMethod === "CASH" ? null : bankName,
+        transactionReference: paymentMethod === "CASH" ? null : transactionReference,
+        amount: centsToMoney(amountCents),
+        recordedById: req.user.id,
+      },
+    });
+    const updated = await transaction.sale.update({ where: { id: saleId }, data: { creditBalance: centsToMoney(remainingCents - amountCents) }, include: saleInclude });
+    await transaction.auditLog.create({ data: { userId: req.user.id, action: "COLLECT_CREDIT_PAYMENT", entityType: "SALE", entityId: saleId, details: { saleNumber: existing.saleNumber, amount: centsToMoney(amountCents), paymentMethod, remainingBalance: centsToMoney(remainingCents - amountCents) } } });
+    return updated;
+  });
+  return res.status(201).json({ success: true, message: "Credit payment recorded", data: { sale: serializeSale(sale) } });
 }
 
 async function listSales(req, res) {
@@ -909,6 +977,7 @@ async function cancelSale(req, res) {
 module.exports = {
   createSale,
   updateSale,
+  recordCreditPayment,
   listSales,
   getSale,
   cancelSale,

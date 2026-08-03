@@ -250,3 +250,32 @@ test("multiple custom cuts use a non-unique sale-item product relation and prese
   assert.match(migration, /DROP INDEX IF EXISTS "sale_items_sale_id_product_id_key"/);
   assert.match(saleRoutes, /"\/:id\/cancel"/);
 });
+
+test("warehouse operations persist locations, batches, delivery proof, and credit controls", () => {
+  const schema = fs.readFileSync(path.join(__dirname, "..", "prisma", "schema.prisma"), "utf8");
+  const inventoryRoutes = fs.readFileSync(path.join(__dirname, "..", "src", "routes", "inventoryRoutes.js"), "utf8");
+  const releaseRoutes = fs.readFileSync(path.join(__dirname, "..", "src", "routes", "releaseRoutes.js"), "utf8");
+  const saleRoutes = fs.readFileSync(path.join(__dirname, "..", "src", "routes", "saleRoutes.js"), "utf8");
+
+  for (const model of ["InventoryLocation", "InventoryLocationBalance", "StockBatch", "DeliveryProof"]) {
+    assert.match(schema, new RegExp(`model ${model} \\{`));
+  }
+  assert.match(schema, /creditBalance/);
+  assert.match(inventoryRoutes, /"\/locations"/);
+  assert.match(inventoryRoutes, /"\/batches"/);
+  assert.match(inventoryRoutes, /"\/adjustments"/);
+  assert.match(inventoryRoutes, /"\/audit"/);
+  assert.match(releaseRoutes, /"\/:id\/delivery-proof"/);
+  assert.match(saleRoutes, /"\/:id\/payments"/);
+
+  const creditSale = validateSaleRequest({
+    clientRequestId: "b4f84dc2-9f0c-4d2f-96a0-523bc30a102e",
+    customerId: 7,
+    allowCredit: true,
+    creditDueAt: "2026-09-01T12:00:00.000Z",
+    items: [{ productId: 12, quantity: 1 }],
+    payments: [],
+  });
+  assert.deepEqual(creditSale.errors, []);
+  assert.equal(creditSale.data.allowCredit, true);
+});

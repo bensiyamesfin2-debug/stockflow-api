@@ -99,6 +99,7 @@ model User {
   favorites            Favorite[]
   attachments          FileAttachment[]
   invoiceTemplates     InvoiceTemplate[]
+  deliveryProofs       DeliveryProof[]     @relation("DeliveredBy")
   twoFactorSecret      String?              @map("two_factor_secret") @db.VarChar(128)
   twoFactorEnabled     Boolean              @default(false) @map("two_factor_enabled")
   isPlatformOwner      Boolean              @default(false) @map("is_platform_owner")
@@ -141,6 +142,8 @@ model Product {
   category           Category?           @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   purchaseOrderItems PurchaseOrderItem[]
   stockCountItems    StockCountItem[]
+  locationBalances   InventoryLocationBalance[]
+  stockBatches       StockBatch[]
 
   @@index([categoryId])
   @@map("products")
@@ -169,6 +172,8 @@ model Sale {
   customerName       String?            @map("customer_name") @db.VarChar(150)
   discountAmount     Decimal            @default(0) @map("discount_amount") @db.Decimal(12, 2)
   totalAmount        Decimal            @map("total_amount") @db.Decimal(12, 2)
+  creditBalance      Decimal            @default(0) @map("credit_balance") @db.Decimal(12, 2)
+  creditDueAt        DateTime?          @map("credit_due_at") @db.Timestamptz(3)
   status             SaleStatus         @default(PENDING_RELEASE)
   createdAt          DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt          DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -242,6 +247,7 @@ model InventoryRelease {
   sale          Sale                   @relation(fields: [saleId], references: [id], onDelete: Restrict)
   releasedBy    User                   @relation("ReleasedBy", fields: [releasedById], references: [id], onDelete: Restrict)
   items         InventoryReleaseItem[]
+  deliveryProof DeliveryProof?
 
   @@index([saleId])
   @@map("inventory_releases")
@@ -267,6 +273,10 @@ model StockReceipt {
   supplierId      Int?               @map("supplier_id")
   purchaseOrderId Int?               @map("purchase_order_id")
   referenceNumber String?            @map("reference_number") @db.VarChar(150)
+  containerNumber String?            @map("container_number") @db.VarChar(100)
+  vehiclePlate    String?            @map("vehicle_plate") @db.VarChar(80)
+  qualityStatus   String?            @map("quality_status") @db.VarChar(40)
+  inspectionNotes String?            @map("inspection_notes")
   receivedById    Int                @map("received_by_id")
   notes           String?
   createdAt       DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
@@ -274,6 +284,7 @@ model StockReceipt {
   items           StockReceiptItem[]
   supplier        Supplier?          @relation(fields: [supplierId], references: [id], onDelete: SetNull)
   purchaseOrder   PurchaseOrder?     @relation(fields: [purchaseOrderId], references: [id], onDelete: SetNull)
+  batches         StockBatch[]
 
   @@index([receivedById, createdAt])
   @@index([supplierId])
@@ -286,9 +297,12 @@ model StockReceiptItem {
   receiptId Int          @map("receipt_id")
   productId Int          @map("product_id")
   quantity  Int
-  unitCost  Decimal?     @map("unit_cost") @db.Decimal(12, 2)
+  unitCost        Decimal?     @map("unit_cost") @db.Decimal(12, 2)
+  damagedQuantity Int          @default(0) @map("damaged_quantity")
+  batchId         Int?         @unique @map("batch_id")
   receipt   StockReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
   product   Product      @relation(fields: [productId], references: [id], onDelete: Restrict)
+  batch     StockBatch?  @relation(fields: [batchId], references: [id], onDelete: SetNull)
 
   @@unique([receiptId, productId])
   @@index([productId])
@@ -312,6 +326,83 @@ model InventoryMovement {
   @@index([productId, createdAt])
   @@index([referenceType, referenceId])
   @@map("inventory_movements")
+}
+
+model InventoryLocation {
+  id        Int      @id @default(autoincrement())
+  code      String   @unique @db.VarChar(80)
+  name      String   @db.VarChar(120)
+  warehouse String?  @db.VarChar(120)
+  rowLabel  String?  @map("row_label") @db.VarChar(60)
+  rack      String?  @db.VarChar(60)
+  slot      String?  @db.VarChar(60)
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  balances  InventoryLocationBalance[]
+  batches   StockBatch[]
+
+  @@map("inventory_locations")
+}
+
+model InventoryLocationBalance {
+  id         Int               @id @default(autoincrement())
+  locationId Int               @map("location_id")
+  productId  Int               @map("product_id")
+  quantity   Int               @default(0)
+  updatedAt  DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+  location   InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  product    Product           @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([locationId, productId])
+  @@index([productId])
+  @@map("inventory_location_balances")
+}
+
+model StockBatch {
+  id                Int                @id @default(autoincrement())
+  batchNumber       String             @unique @map("batch_number") @db.VarChar(120)
+  productId         Int                @map("product_id")
+  receiptId         Int?               @map("receipt_id")
+  supplierId        Int?               @map("supplier_id")
+  locationId        Int?               @map("location_id")
+  origin            String?            @db.VarChar(120)
+  color             String?            @db.VarChar(120)
+  grade             String?            @db.VarChar(80)
+  originalQuantity  Int                @map("original_quantity")
+  availableQuantity Int                @map("available_quantity")
+  notes             String?
+  createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+  product           Product            @relation(fields: [productId], references: [id], onDelete: Restrict)
+  receipt           StockReceipt?      @relation(fields: [receiptId], references: [id], onDelete: SetNull)
+  supplier          Supplier?          @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  location          InventoryLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  receiptItem       StockReceiptItem?
+
+  @@index([productId, availableQuantity])
+  @@index([locationId])
+  @@map("stock_batches")
+}
+
+model DeliveryProof {
+  id                 Int              @id @default(autoincrement())
+  releaseId          Int              @unique @map("release_id")
+  deliveredById      Int              @map("delivered_by_id")
+  receiverName       String           @map("receiver_name") @db.VarChar(150)
+  receiverPhone      String?          @map("receiver_phone") @db.VarChar(40)
+  signatureName      String?          @map("signature_name") @db.VarChar(150)
+  photoName          String?          @map("photo_name") @db.VarChar(180)
+  photoMimeType      String?          @map("photo_mime_type") @db.VarChar(100)
+  photoContent       String?          @map("photo_content")
+  notes              String?
+  deliveredAt        DateTime         @default(now()) @map("delivered_at") @db.Timestamptz(3)
+  createdAt          DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  release            InventoryRelease @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  deliveredBy        User             @relation("DeliveredBy", fields: [deliveredById], references: [id], onDelete: Restrict)
+
+  @@index([deliveredAt])
+  @@map("delivery_proofs")
 }
 
 model AuditLog {
@@ -401,6 +492,7 @@ model Supplier {
   updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
   purchaseOrders PurchaseOrder[]
   stockReceipts  StockReceipt[]
+  stockBatches   StockBatch[]
 
   @@map("suppliers")
 }

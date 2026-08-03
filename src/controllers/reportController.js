@@ -320,6 +320,43 @@ async function getLiveSalesSummary(req, res) {
   });
 }
 
+async function getCustomerBalances(req, res) {
+  const salesWhere = {
+    creditBalance: { gt: 0 },
+    status: { not: "CANCELLED" },
+    ...(req.user.role === "CASHIER" ? { cashierId: req.user.id } : {}),
+  };
+  const customers = await prisma.customer.findMany({
+    where: { sales: { some: salesWhere } },
+    include: {
+      sales: {
+        where: salesWhere,
+        select: { id: true, saleNumber: true, creditBalance: true, creditDueAt: true, createdAt: true },
+        orderBy: { creditDueAt: "asc" },
+      },
+    },
+    orderBy: { name: "asc" },
+    take: 500,
+  });
+  const now = new Date();
+  const balances = customers.map((customer) => {
+    const outstandingCents = customer.sales.reduce((total, sale) => total + moneyToCents(sale.creditBalance.toFixed(2)), 0n);
+    return {
+      customer: { id: customer.id, name: customer.name, phone: customer.phone, email: customer.email },
+      outstanding: centsToMoney(outstandingCents),
+      overdue: customer.sales.some((sale) => sale.creditDueAt && sale.creditDueAt < now),
+      sales: customer.sales,
+    };
+  });
+  return res.json({
+    success: true,
+    data: {
+      balances,
+      totalOutstanding: centsToMoney(balances.reduce((total, entry) => total + moneyToCents(entry.outstanding), 0n)),
+    },
+  });
+}
+
 async function getSalesReport(req, res) {
   const { from, to } = parseDateRange(req.query);
   const sales = await prisma.sale.findMany({
@@ -814,6 +851,7 @@ async function getValuationReport(req, res) {
 module.exports = {
   getDashboard,
   getLiveSalesSummary,
+  getCustomerBalances,
   getSalesReport,
   getPaymentReport,
   getProfitReport,
