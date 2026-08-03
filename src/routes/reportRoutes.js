@@ -1,6 +1,7 @@
 const express = require("express");
 const {
   getDashboard,
+  getLiveSalesSummary,
   getSalesReport,
   getPaymentReport,
   getProfitReport,
@@ -15,6 +16,7 @@ const { authenticate, authorizeRoles } = require("../middleware/auth");
 const router = express.Router();
 
 router.get("/dashboard", authenticate, getDashboard);
+router.get("/sales-summary", authenticate, authorizeRoles("ADMIN", "CASHIER"), getLiveSalesSummary);
 router.get("/sales", authenticate, authorizeRoles("ADMIN"), getSalesReport);
 router.get("/profit", authenticate, authorizeRoles("ADMIN"), getProfitReport);
 router.get(

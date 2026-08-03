@@ -93,6 +93,14 @@ model User {
   stockCountsCompleted StockCount[]        @relation("StockCountsCompleted")
   stockCountsAdjusted  StockCount[]        @relation("StockCountsAdjusted")
   shifts               Shift[]
+  preferences          UserPreference?
+  notes                WorkspaceNote[]
+  calendarEvents       CalendarEvent[]      @relation("CalendarEventOwner")
+  favorites            Favorite[]
+  attachments          FileAttachment[]
+  invoiceTemplates     InvoiceTemplate[]
+  twoFactorSecret      String?              @map("two_factor_secret") @db.VarChar(128)
+  twoFactorEnabled     Boolean              @default(false) @map("two_factor_enabled")
 
   @@map("users")
 }
@@ -200,7 +208,7 @@ model SaleItem {
   product            Product                @relation(fields: [productId], references: [id], onDelete: Restrict)
   releaseItems       InventoryReleaseItem[]
 
-  @@unique([saleId, productId])
+  @@index([saleId, productId])
   @@index([productId])
   @@map("sale_items")
 }
@@ -521,4 +529,113 @@ model Shift {
   @@index([userId, status])
   @@index([openedAt])
   @@map("shifts")
+}
+
+model WorkspaceSettings {
+  id                 Int      @id @default(autoincrement())
+  companyName        String   @default("StockFlow workspace") @map("company_name") @db.VarChar(160)
+  companyCode        String?  @map("company_code") @db.VarChar(40)
+  primaryCurrency    String   @default("ETB") @map("primary_currency") @db.VarChar(3)
+  locale             String   @default("en") @db.VarChar(10)
+  timezone           String   @default("Africa/Addis_Ababa") @db.VarChar(64)
+  invoiceEmail       String?  @map("invoice_email") @db.VarChar(254)
+  invoicePhone       String?  @map("invoice_phone") @db.VarChar(40)
+  updatedById        Int?     @map("updated_by_id")
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("workspace_settings")
+}
+
+model UserPreference {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @unique @map("user_id")
+  theme     String   @default("system") @db.VarChar(10)
+  language  String   @default("en") @db.VarChar(10)
+  currency  String?  @db.VarChar(3)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("user_preferences")
+}
+
+model WorkspaceNote {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  title     String   @db.VarChar(140)
+  content   String   @default("")
+  color     String   @default("yellow") @db.VarChar(20)
+  isPinned  Boolean  @default(false) @map("is_pinned")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isPinned, updatedAt])
+  @@map("workspace_notes")
+}
+
+model CalendarEvent {
+  id          Int      @id @default(autoincrement())
+  ownerId     Int      @map("owner_id")
+  title       String   @db.VarChar(160)
+  description String?
+  startsAt    DateTime @map("starts_at") @db.Timestamptz(3)
+  endsAt      DateTime @map("ends_at") @db.Timestamptz(3)
+  color       String   @default("teal") @db.VarChar(20)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  owner       User     @relation("CalendarEventOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([startsAt, endsAt])
+  @@index([ownerId, startsAt])
+  @@map("calendar_events")
+}
+
+model Favorite {
+  id           Int      @id @default(autoincrement())
+  userId       Int      @map("user_id")
+  resourceType String   @map("resource_type") @db.VarChar(40)
+  resourceId   String   @map("resource_id") @db.VarChar(100)
+  label        String   @db.VarChar(160)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, resourceType, resourceId])
+  @@index([userId, createdAt])
+  @@map("favorites")
+}
+
+model FileAttachment {
+  id           Int      @id @default(autoincrement())
+  uploadedById Int      @map("uploaded_by_id")
+  name         String   @db.VarChar(180)
+  mimeType     String   @map("mime_type") @db.VarChar(100)
+  sizeBytes    Int      @map("size_bytes")
+  content      String
+  resourceType String?  @map("resource_type") @db.VarChar(40)
+  resourceId   String?  @map("resource_id") @db.VarChar(100)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  uploadedBy   User     @relation(fields: [uploadedById], references: [id], onDelete: Cascade)
+
+  @@index([resourceType, resourceId])
+  @@index([uploadedById, createdAt])
+  @@map("file_attachments")
+}
+
+model InvoiceTemplate {
+  id          Int      @id @default(autoincrement())
+  createdById Int      @map("created_by_id")
+  name        String   @db.VarChar(120)
+  header      String?  @db.VarChar(300)
+  footer      String?  @db.VarChar(500)
+  accentColor String   @default("#176b5d") @map("accent_color") @db.VarChar(16)
+  isDefault   Boolean  @default(false) @map("is_default")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy   User     @relation(fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@index([isDefault])
+  @@index([createdById, createdAt])
+  @@map("invoice_templates")
 }

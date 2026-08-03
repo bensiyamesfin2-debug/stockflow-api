@@ -21,6 +21,7 @@ const supplierRoutes = require("./routes/supplierRoutes");
 const purchaseOrderRoutes = require("./routes/purchaseOrderRoutes");
 const testRoutes = require("./routes/testRoutes");
 const userRoutes = require("./routes/userRoutes");
+const workspaceRoutes = require("./routes/workspaceRoutes");
 const { authenticate, authorizeRoles } = require("./middleware/auth");
 
 const app = express();
@@ -114,6 +115,7 @@ app.use("/api/inventory", inventoryRoutes);
 app.use("/api/leads", leadRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/users", userRoutes);
+app.use("/api/workspace", workspaceRoutes);
 app.use(
   "/api/test",
   authenticate,

@@ -11,7 +11,7 @@ const {
   sendNewSalePushNotification,
 } = require("../utils/pushNotifications");
 const {
-  calculateCustomOrder,
+  planCustomCuts,
   normalizeCustomMeasurement,
 } = require("../utils/customOrder");
 
@@ -82,6 +82,15 @@ function serializeSale(sale) {
   };
 }
 
+function parseSaleDate(value, endOfDay = false) {
+  if (!value) return undefined;
+  const raw = String(value).trim();
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(raw)
+    ? new Date(`${raw}T${endOfDay ? "23:59:59.999" : "00:00:00"}`)
+    : new Date(raw);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 function validateSaleRequest(body) {
   const errors = [];
   const customerName = String(body.customerName || "").trim() || null;
@@ -89,7 +98,6 @@ function validateSaleRequest(body) {
   const rawPayments = body.payments;
   const items = [];
   const payments = [];
-  const productIds = new Set();
   const clientRequestId = normalizeClientRequestId(body.clientRequestId);
   const customerId =
     body.customerId === undefined || body.customerId === null || body.customerId === ""
@@ -138,15 +146,10 @@ function validateSaleRequest(body) {
         errors.push(`Sale item ${index + 1} has an invalid product ID`);
       }
 
-      if (!Number.isInteger(quantity) || quantity <= 0) {
-        errors.push(`Sale item ${index + 1} quantity must be a positive whole number`);
+      if (!Number.isInteger(quantity) || (customMeasurement ? quantity < 0 : quantity <= 0)) {
+        errors.push(`Sale item ${index + 1} quantity must be ${customMeasurement ? "zero or a positive" : "a positive"} whole number`);
       }
 
-      if (Number.isInteger(productId) && productIds.has(productId)) {
-        errors.push(`Product ${productId} appears more than once in the sale`);
-      }
-
-      productIds.add(productId);
       items.push({ productId, quantity, customMeasurement });
     });
   }
@@ -220,6 +223,57 @@ function validateSaleRequest(body) {
   };
 }
 
+function sumQuantityByProduct(items) {
+  return items.reduce((quantities, item) => {
+    quantities.set(
+      item.productId,
+      (quantities.get(item.productId) || 0) + item.quantity
+    );
+    return quantities;
+  }, new Map());
+}
+
+function applySharedCustomCutPlans(items, productsById) {
+  const grouped = new Map();
+  items.forEach((item, index) => {
+    if (!item.customMeasurement) return;
+    const entries = grouped.get(item.productId) || [];
+    entries.push({ item, index });
+    grouped.set(item.productId, entries);
+  });
+
+  for (const [productId, entries] of grouped) {
+    const product = productsById.get(productId);
+    const plan = planCustomCuts(product, entries.map((entry) => entry.item.customMeasurement));
+    entries.forEach((entry, index) => {
+      entry.item.quantity = plan.allocations[index];
+      entry.item.piecesPerStockUnit = plan.piecesPerStockUnit[index];
+    });
+  }
+}
+
+function ensureRequestedStockIsAvailable(
+  productsById,
+  requestedQuantityByProduct,
+  existingQuantityByProduct = new Map()
+) {
+  for (const [productId, requestedQuantity] of requestedQuantityByProduct) {
+    const product = productsById.get(productId);
+    const inventory = product?.inventory;
+    const availableQuantity = inventory
+      ? inventory.quantity - inventory.reservedQuantity +
+        (existingQuantityByProduct.get(productId) || 0)
+      : 0;
+
+    if (availableQuantity < requestedQuantity) {
+      throw new HttpError(
+        409,
+        `Only ${availableQuantity} unit(s) of ${product.name} are available`
+      );
+    }
+  }
+}
+
 async function createSale(req, res) {
   const { data, errors } = validateSaleRequest(req.body);
 
@@ -246,17 +300,20 @@ async function createSale(req, res) {
         }
       }
 
+    const productIds = [...new Set(data.items.map((item) => item.productId))];
     const products = await transaction.product.findMany({
-      where: { id: { in: data.items.map((item) => item.productId) } },
+      where: { id: { in: productIds } },
       include: { inventory: true },
     });
 
-    if (products.length !== data.items.length) {
+    if (products.length !== productIds.length) {
       throw new HttpError(400, "One or more products do not exist");
     }
 
     const productsById = new Map(products.map((product) => [product.id, product]));
+    applySharedCustomCutPlans(data.items, productsById);
     let subtotalCents = 0n;
+    const requestedQuantityByProduct = new Map();
 
     for (const item of data.items) {
       const product = productsById.get(item.productId);
@@ -265,30 +322,14 @@ async function createSale(req, res) {
         throw new HttpError(400, `${product.name} is inactive and cannot be sold`);
       }
 
-      const inventory = product.inventory;
-      if (item.customMeasurement) {
-        const calculation = calculateCustomOrder(product, item.customMeasurement);
-        if (item.quantity !== calculation.quantity) {
-          throw new HttpError(
-            409,
-            `The custom order requires ${calculation.quantity} stock unit(s)`
-          );
-        }
-        item.piecesPerStockUnit = calculation.piecesPerStockUnit;
-      }
-      const availableQuantity = inventory
-        ? inventory.quantity - inventory.reservedQuantity
-        : 0;
-
-      if (availableQuantity < item.quantity) {
-        throw new HttpError(
-          409,
-          `Only ${availableQuantity} unit(s) of ${product.name} are available`
-        );
-      }
-
+      requestedQuantityByProduct.set(
+        product.id,
+        (requestedQuantityByProduct.get(product.id) || 0) + item.quantity
+      );
       subtotalCents += sellableUnitPriceCents(product) * BigInt(item.quantity);
     }
+
+    ensureRequestedStockIsAvailable(productsById, requestedQuantityByProduct);
 
     let customer = null;
     if (data.customerId !== null) {
@@ -517,22 +558,23 @@ async function updateSale(req, res) {
       );
     }
 
+    const productIds = [...new Set(data.items.map((item) => item.productId))];
     const products = await transaction.product.findMany({
-      where: { id: { in: data.items.map((item) => item.productId) } },
+      where: { id: { in: productIds } },
       include: { inventory: true },
     });
 
-    if (products.length !== data.items.length) {
+    if (products.length !== productIds.length) {
       throw new HttpError(400, "One or more products do not exist");
     }
 
     const productsById = new Map(
       products.map((product) => [product.id, product])
     );
-    const currentQuantityByProduct = new Map(
-      existingSale.items.map((item) => [item.productId, item.quantity])
-    );
+    applySharedCustomCutPlans(data.items, productsById);
+    const currentQuantityByProduct = sumQuantityByProduct(existingSale.items);
     let subtotalCents = 0n;
+    const requestedQuantityByProduct = new Map();
 
     for (const item of data.items) {
       const product = productsById.get(item.productId);
@@ -544,32 +586,18 @@ async function updateSale(req, res) {
         );
       }
 
-      const inventory = product.inventory;
-      if (item.customMeasurement) {
-        const calculation = calculateCustomOrder(product, item.customMeasurement);
-        if (item.quantity !== calculation.quantity) {
-          throw new HttpError(
-            409,
-            `The custom order requires ${calculation.quantity} stock unit(s)`
-          );
-        }
-        item.piecesPerStockUnit = calculation.piecesPerStockUnit;
-      }
-      const availableQuantity = inventory
-        ? inventory.quantity -
-          inventory.reservedQuantity +
-          (currentQuantityByProduct.get(product.id) || 0)
-        : 0;
-
-      if (availableQuantity < item.quantity) {
-        throw new HttpError(
-          409,
-          `Only ${availableQuantity} unit(s) of ${product.name} are available`
-        );
-      }
-
+      requestedQuantityByProduct.set(
+        product.id,
+        (requestedQuantityByProduct.get(product.id) || 0) + item.quantity
+      );
       subtotalCents += sellableUnitPriceCents(product) * BigInt(item.quantity);
     }
+
+    ensureRequestedStockIsAvailable(
+      productsById,
+      requestedQuantityByProduct,
+      currentQuantityByProduct
+    );
 
     let customer = null;
     if (data.customerId !== null) {
@@ -720,6 +748,12 @@ async function updateSale(req, res) {
 async function listSales(req, res) {
   const status = String(req.query.status || "").trim().toUpperCase();
   const where = {};
+  const from = parseSaleDate(req.query.from);
+  const to = parseSaleDate(req.query.to, true);
+
+  if (from === null || to === null || (from && to && from > to)) {
+    return res.status(400).json({ success: false, message: "Invalid sale date range" });
+  }
 
   if (req.user.role === "CASHIER") {
     where.cashierId = req.user.id;
@@ -730,6 +764,10 @@ async function listSales(req, res) {
       return res.status(400).json({ success: false, message: "Invalid sale status" });
     }
     where.status = status;
+  }
+
+  if (from || to) {
+    where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
   }
 
   const sales = await prisma.sale.findMany({
@@ -874,4 +912,6 @@ module.exports = {
   listSales,
   getSale,
   cancelSale,
+  validateSaleRequest,
+  sumQuantityByProduct,
 };

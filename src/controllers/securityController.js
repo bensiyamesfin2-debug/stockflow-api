@@ -1,5 +1,6 @@
 const prisma = require("../config/prisma");
 const { encryptJsonBackup } = require("../utils/backupEncryption");
+const { generateSecret, verifyCode, provisioningUri } = require("../utils/totp");
 
 async function getSecurityStatus(req, res) {
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -8,6 +9,7 @@ async function getSecurityStatus(req, res) {
     select: {
       lastLoginAt: true,
       passwordChangedAt: true,
+      twoFactorEnabled: true,
     },
   });
 
@@ -49,6 +51,36 @@ async function getSecurityStatus(req, res) {
   }
 
   return res.json({ success: true, data });
+}
+
+async function startTwoFactorSetup(req, res) {
+  const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { username: true } });
+  const secret = generateSecret();
+  await prisma.user.update({ where: { id: req.user.id }, data: { twoFactorSecret: secret, twoFactorEnabled: false } });
+  await prisma.auditLog.create({ data: { userId: req.user.id, action: "TWO_FACTOR_SETUP_STARTED", entityType: "USER", entityId: req.user.id } });
+  return res.json({ success: true, data: { provisioningUri: provisioningUri(secret, user.username), manualKey: secret } });
+}
+
+async function verifyTwoFactorSetup(req, res) {
+  const code = String(req.body.code || "");
+  const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { twoFactorSecret: true } });
+  if (!user?.twoFactorSecret || !verifyCode(user.twoFactorSecret, code)) return res.status(400).json({ success: false, message: "That code did not match. Try the newest code from your authenticator app." });
+  await prisma.$transaction([
+    prisma.user.update({ where: { id: req.user.id }, data: { twoFactorEnabled: true } }),
+    prisma.auditLog.create({ data: { userId: req.user.id, action: "TWO_FACTOR_ENABLED", entityType: "USER", entityId: req.user.id } }),
+  ]);
+  return res.json({ success: true, message: "Two-factor authentication is enabled" });
+}
+
+async function disableTwoFactor(req, res) {
+  const code = String(req.body.code || "");
+  const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { twoFactorSecret: true, twoFactorEnabled: true } });
+  if (!user?.twoFactorEnabled || !user.twoFactorSecret || !verifyCode(user.twoFactorSecret, code)) return res.status(400).json({ success: false, message: "Enter a valid authenticator code to turn off two-factor authentication" });
+  await prisma.$transaction([
+    prisma.user.update({ where: { id: req.user.id }, data: { twoFactorEnabled: false, twoFactorSecret: null, tokenVersion: { increment: 1 } } }),
+    prisma.auditLog.create({ data: { userId: req.user.id, action: "TWO_FACTOR_DISABLED", entityType: "USER", entityId: req.user.id } }),
+  ]);
+  return res.json({ success: true, message: "Two-factor authentication is disabled. Sign in again." });
 }
 
 async function createEncryptedBackup(req, res) {
@@ -174,4 +206,4 @@ async function createEncryptedBackup(req, res) {
   return res.send(JSON.stringify(encryptedBackup, null, 2));
 }
 
-module.exports = { getSecurityStatus, createEncryptedBackup };
+module.exports = { getSecurityStatus, createEncryptedBackup, startTwoFactorSetup, verifyTwoFactorSetup, disableTwoFactor };

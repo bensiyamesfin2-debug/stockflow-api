@@ -28,10 +28,21 @@ function parseDateRange(query) {
   defaultFrom.setDate(defaultFrom.getDate() - 29);
   defaultFrom.setHours(0, 0, 0, 0);
 
-  const from = query.from ? new Date(`${query.from}T00:00:00`) : defaultFrom;
-  const to = query.to ? new Date(`${query.to}T23:59:59.999`) : new Date();
+  const parseBoundary = (value, endOfDay = false) => {
+    if (!value) return undefined;
+    const raw = String(value).trim();
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(raw)
+      ? new Date(`${raw}T${endOfDay ? "23:59:59.999" : "00:00:00"}`)
+      : new Date(raw);
+    return Number.isNaN(date.getTime()) ? null : date;
+  };
 
-  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) {
+  const parsedFrom = parseBoundary(query.from);
+  const parsedTo = parseBoundary(query.to, true);
+  const from = parsedFrom === undefined ? defaultFrom : parsedFrom;
+  const to = parsedTo === undefined ? new Date() : parsedTo;
+
+  if (!from || !to || from > to) {
     throw new HttpError(400, "Invalid report date range");
   }
 
@@ -256,6 +267,57 @@ async function getDashboard(req, res) {
   if (req.user.role === "INVENTORY_STAFF") dashboard = await inventoryDashboard();
 
   return res.json({ success: true, data: { dashboard } });
+}
+
+async function getLiveSalesSummary(req, res) {
+  const { from, to } = parseDateRange(req.query);
+  const sales = await findAllById(prisma.sale, {
+    where: {
+      createdAt: { gte: from, lte: to },
+      status: { not: "CANCELLED" },
+      ...(req.user.role === "CASHIER" ? { cashierId: req.user.id } : {}),
+    },
+    select: {
+      id: true,
+      totalAmount: true,
+      discountAmount: true,
+      status: true,
+      payments: {
+        where: { status: "COMPLETED" },
+        select: { amount: true, paymentMethod: true },
+      },
+    },
+  });
+
+  const completedPayments = sales.flatMap((sale) => sale.payments);
+  const paymentMethods = [...completedPayments.reduce((groups, payment) => {
+    const current = groups.get(payment.paymentMethod) || { count: 0, amounts: [] };
+    current.count += 1;
+    current.amounts.push(payment.amount);
+    groups.set(payment.paymentMethod, current);
+    return groups;
+  }, new Map())].map(([paymentMethod, values]) => ({
+    paymentMethod,
+    count: values.count,
+    amount: sumMoney(values.amounts),
+  }));
+
+  return res.json({
+    success: true,
+    data: {
+      range: { from, to },
+      updatedAt: new Date(),
+      metrics: {
+        sales: sales.length,
+        revenue: sumMoney(sales.map((sale) => sale.totalAmount)),
+        discounts: sumMoney(sales.map((sale) => sale.discountAmount)),
+        collected: sumMoney(completedPayments.map((payment) => payment.amount)),
+        awaitingRelease: sales.filter((sale) => ["PENDING_RELEASE", "PARTIALLY_RELEASED"].includes(sale.status)).length,
+        completed: sales.filter((sale) => sale.status === "COMPLETED").length,
+      },
+      paymentMethods,
+    },
+  });
 }
 
 async function getSalesReport(req, res) {
@@ -751,6 +813,7 @@ async function getValuationReport(req, res) {
 
 module.exports = {
   getDashboard,
+  getLiveSalesSummary,
   getSalesReport,
   getPaymentReport,
   getProfitReport,

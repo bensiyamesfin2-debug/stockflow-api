@@ -6,6 +6,7 @@ const {
 const { sellableUnitPriceCents } = require("../src/utils/salePricing");
 const {
   calculateCustomOrder,
+  planCustomCuts,
   normalizeCustomMeasurement,
 } = require("../src/utils/customOrder");
 const {
@@ -106,6 +107,20 @@ test("custom measurements calculate a definite whole-stock quantity", () => {
     ),
     { quantity: 1, piecesPerStockUnit: 11 }
   );
+});
+
+test("complementary custom cuts share one stock slab instead of reserving it twice", () => {
+  const plan = planCustomCuts(
+    { name: "Markino", length: 220, width: 34, thickness: 3 },
+    [
+      { length: 100, width: 34, thickness: 3, pieces: 1 },
+      { length: 120, width: 34, thickness: 3, pieces: 1 },
+    ]
+  );
+
+  assert.equal(plan.quantity, 1);
+  assert.equal(plan.allocations.reduce((total, quantity) => total + quantity, 0), 1);
+  assert.deepEqual(plan.piecesPerStockUnit, [2, 1]);
 });
 
 test("custom measurements reject incomplete or impossible cuts", () => {

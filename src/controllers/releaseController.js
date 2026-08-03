@@ -108,6 +108,7 @@ async function createRelease(req, res) {
 
     const saleItemsById = new Map(sale.items.map((item) => [item.id, item]));
     const releaseQuantityByItemId = new Map();
+    const releaseQuantityByProductId = new Map();
 
     for (const requestedItem of data.items) {
       const saleItem = saleItemsById.get(requestedItem.saleItemId);
@@ -128,23 +129,31 @@ async function createRelease(req, res) {
         );
       }
 
-      const inventory = saleItem.product.inventory;
+      releaseQuantityByItemId.set(saleItem.id, requestedItem.quantity);
+      releaseQuantityByProductId.set(
+        saleItem.productId,
+        (releaseQuantityByProductId.get(saleItem.productId) || 0) +
+          requestedItem.quantity
+      );
+    }
 
-      if (!inventory || inventory.quantity < requestedItem.quantity) {
+    for (const [productId, releaseQuantity] of releaseQuantityByProductId) {
+      const saleItem = sale.items.find((item) => item.productId === productId);
+      const inventory = saleItem?.product.inventory;
+
+      if (!inventory || inventory.quantity < releaseQuantity) {
         throw new HttpError(
           409,
           `Physical stock for ${saleItem.product.name} is insufficient`
         );
       }
 
-      if (inventory.reservedQuantity < requestedItem.quantity) {
+      if (inventory.reservedQuantity < releaseQuantity) {
         throw new HttpError(
           409,
           `Reserved stock for ${saleItem.product.name} is inconsistent`
         );
       }
-
-      releaseQuantityByItemId.set(saleItem.id, requestedItem.quantity);
     }
 
     const createdRelease = await transaction.inventoryRelease.create({

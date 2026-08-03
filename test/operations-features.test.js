@@ -11,7 +11,16 @@ const { normalizeCountedItems } = require("../src/controllers/stockCountControll
 const { normalizeDiscount } = require("../src/controllers/discountController");
 const { calculateDiscountCents } = require("../src/utils/discounts");
 const { centsToMoney } = require("../src/utils/money");
-const { sendCsv } = require("../src/controllers/exportController");
+const { sendCsv, parseDate } = require("../src/controllers/exportController");
+const {
+  validateSaleRequest,
+  sumQuantityByProduct,
+} = require("../src/controllers/saleController");
+const {
+  MEASUREMENTS,
+  PRODUCT_FAMILIES,
+  buildTrialProducts,
+} = require("../src/scripts/setupSayinTrial");
 
 test("operations schema contains every new model and relation target", () => {
   const schema = fs.readFileSync(
@@ -54,6 +63,15 @@ test("every operations route is mounted in app.js", () => {
       new RegExp(`app\\.use\\("${route}",\\s*${variable}\\)`)
     );
   }
+});
+
+test("live sales summaries are available to administrators and cashiers", () => {
+  const routes = fs.readFileSync(
+    path.join(__dirname, "..", "src", "routes", "reportRoutes.js"),
+    "utf8"
+  );
+  assert.match(routes, /"\/sales-summary"/);
+  assert.match(routes, /authorizeRoles\("ADMIN", "CASHIER"\)/);
 });
 
 test("category, supplier, and customer inputs are normalized and bounded", () => {
@@ -156,4 +174,79 @@ test("CSV exports include a BOM, headers, and quoted unsafe values", () => {
   assert.match(headers["content-disposition"], /test\.csv/);
   assert.ok(body.startsWith("\uFEFFName"));
   assert.match(body, /"Galaxy, ""Premium"""/);
+});
+
+test("exports preserve an exact selected timestamp", () => {
+  assert.equal(
+    parseDate("2026-07-29T12:45:00.000Z").toISOString(),
+    "2026-07-29T12:45:00.000Z"
+  );
+});
+
+test("Sayin's trial catalogue keeps all supplied granite families and measurements", () => {
+  assert.deepEqual(PRODUCT_FAMILIES, [
+    "603",
+    "664",
+    "602",
+    "Spray White",
+    "664 Old",
+    "Black Galaxy",
+    "River Black",
+    "Tiger Skin",
+  ]);
+  assert.equal(MEASUREMENTS.length, 66);
+
+  const products = buildTrialProducts(1);
+  assert.equal(products.length, 528);
+  assert.equal(new Set(products.map((product) => product.sku)).size, 528);
+  assert.ok(products.every((product) => product.sellingPrice === "0.00"));
+});
+
+test("one order can contain several custom cuts from the same stock item", () => {
+  const result = validateSaleRequest({
+    clientRequestId: "d4f84dc2-9f0c-4d2f-96a0-523bc30a102e",
+    items: [
+      {
+        productId: 12,
+        quantity: 1,
+        customMeasurement: { length: 100, width: 30, thickness: 3, pieces: 2 },
+      },
+      {
+        productId: 12,
+        quantity: 2,
+        customMeasurement: { length: 80, width: 30, thickness: 3, pieces: 5 },
+      },
+    ],
+    payments: [{ paymentMethod: "CASH", amount: "1.00" }],
+  });
+
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.data.items.length, 2);
+  assert.equal(sumQuantityByProduct(result.data.items).get(12), 3);
+});
+
+test("multiple custom cuts use a non-unique sale-item product relation and preserve cancellation", () => {
+  const schema = fs.readFileSync(
+    path.join(__dirname, "..", "prisma", "schema.prisma"),
+    "utf8"
+  );
+  const migration = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "prisma",
+      "migrations",
+      "20260729170000_allow_multiple_custom_cuts_per_product",
+      "migration.sql"
+    ),
+    "utf8"
+  );
+  const saleRoutes = fs.readFileSync(
+    path.join(__dirname, "..", "src", "routes", "saleRoutes.js"),
+    "utf8"
+  );
+
+  assert.doesNotMatch(schema, /@@unique\(\[saleId, productId\]\)/);
+  assert.match(migration, /DROP INDEX IF EXISTS "sale_items_sale_id_product_id_key"/);
+  assert.match(saleRoutes, /"\/:id\/cancel"/);
 });

@@ -7,6 +7,7 @@ const {
   getPairingState,
   hashPairingToken,
 } = require("../utils/loginPairing");
+const { verifyCode } = require("../utils/totp");
 
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const ACCOUNT_LOCK_MINUTES = 15;
@@ -133,6 +134,7 @@ async function initializeAdmin(req, res) {
 async function login(req, res) {
   const username = String(req.body.username || "").trim().toLowerCase();
   const password = String(req.body.password || "");
+  const twoFactorCode = String(req.body.twoFactorCode || "");
 
   if (!username || !password) {
     return res.status(400).json({
@@ -209,6 +211,24 @@ async function login(req, res) {
       success: false,
       message: "This account is inactive",
     });
+  }
+
+  if (user.twoFactorEnabled) {
+    if (!twoFactorCode || !verifyCode(user.twoFactorSecret, twoFactorCode)) {
+      await prisma.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "TWO_FACTOR_CHALLENGE_FAILED",
+          entityType: "USER",
+          entityId: user.id,
+        },
+      });
+      return res.status(401).json({
+        success: false,
+        requiresTwoFactor: true,
+        message: "Enter the six-digit code from your authenticator app",
+      });
+    }
   }
 
   const authenticatedAt = new Date();

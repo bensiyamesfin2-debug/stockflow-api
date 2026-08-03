@@ -3,8 +3,14 @@ const { createHash } = require("crypto");
 const CORE_PRODUCT_FAMILIES = new Map([
   ["galaxy", "Galaxy"],
   ["640", "640"],
-  ["602", "602"],
   ["markino", "Markino"],
+  ["603", "603"],
+  ["664", "664"],
+  ["602", "602"],
+  ["664 old", "664 Old"],
+  ["black galaxy", "Black Galaxy"],
+  ["river black", "River Black"],
+  ["tiger skin", "Tiger Skin"],
 ]);
 
 function normalizeProductName(value) {

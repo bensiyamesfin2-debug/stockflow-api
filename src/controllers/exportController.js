@@ -11,14 +11,14 @@ function parseDate(value, endOfDay = false) {
   return date;
 }
 
-function dateWhere(req, res) {
+function dateWhere(req, res, field = "createdAt") {
   const from = parseDate(req.query.from);
   const to = parseDate(req.query.to, true);
   if (from === null || to === null || (from && to && from > to)) {
     res.status(400).json({ success: false, message: "Invalid export date range" });
     return null;
   }
-  return from || to ? { createdAt: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } } : {};
+  return from || to ? { [field]: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } } : {};
 }
 
 function sendCsv(res, filename, header, rows) {
@@ -103,7 +103,10 @@ async function exportSales(req, res) {
 }
 
 async function exportInventory(req, res) {
+  const where = dateWhere(req, res, "updatedAt");
+  if (where === null) return;
   const records = await prisma.inventory.findMany({
+    where,
     include: { product: { include: { category: true } } },
     orderBy: { product: { name: "asc" } },
   });
@@ -138,7 +141,10 @@ async function exportInventory(req, res) {
 }
 
 async function exportProducts(req, res) {
+  const where = dateWhere(req, res);
+  if (where === null) return;
   const products = await prisma.product.findMany({
+    where,
     include: { category: true, inventory: true },
     orderBy: [{ name: "asc" }, { thickness: "desc" }, { width: "desc" }, { length: "desc" }],
   });
