@@ -39,6 +39,7 @@ function issueSession(user) {
       fullName: user.fullName,
       username: user.username,
       role: user.role,
+      isPlatformOwner: Boolean(user.isPlatformOwner),
     },
   };
 }

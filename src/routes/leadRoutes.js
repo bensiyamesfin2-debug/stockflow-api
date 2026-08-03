@@ -4,16 +4,16 @@ const {
   listLeads,
   updateLeadStatus,
 } = require("../controllers/leadController");
-const { authenticate, authorizeRoles } = require("../middleware/auth");
+const { authenticate, authorizePlatformOwner } = require("../middleware/auth");
 
 const router = express.Router();
 
 router.post("/", createLead);
-router.get("/", authenticate, authorizeRoles("ADMIN"), listLeads);
+router.get("/", authenticate, authorizePlatformOwner, listLeads);
 router.patch(
   "/:id/status",
   authenticate,
-  authorizeRoles("ADMIN"),
+  authorizePlatformOwner,
   updateLeadStatus
 );
 

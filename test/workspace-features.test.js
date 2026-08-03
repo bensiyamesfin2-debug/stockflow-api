@@ -32,3 +32,17 @@ test("workspace API exposes durable productivity, template, attachment, and deli
     assert.match(schema, new RegExp(`model ${model}`));
   }
 });
+
+test("Bensiya owner access keeps public project leads out of customer workspaces", () => {
+  const auth = readFileSync(path.join(__dirname, "../src/middleware/auth.js"), "utf8");
+  const routes = readFileSync(path.join(__dirname, "../src/routes/leadRoutes.js"), "utf8");
+  const schema = readFileSync(path.join(__dirname, "../prisma/schema.prisma"), "utf8");
+  const migration = readFileSync(path.join(__dirname, "../prisma/migrations/20260803090000_add_bensiya_owner_access/migration.sql"), "utf8");
+
+  assert.match(schema, /isPlatformOwner\s+Boolean/);
+  assert.match(auth, /function authorizePlatformOwner/);
+  assert.match(routes, /authorizePlatformOwner/);
+  assert.doesNotMatch(routes, /authorizeRoles\("ADMIN"\)/);
+  assert.match(migration, /is_platform_owner/);
+  assert.doesNotMatch(migration, /username/);
+});

@@ -56,7 +56,7 @@ async function getSettingsRecord() {
   const existing = await prisma.workspaceSettings.findFirst({ orderBy: { id: "asc" } });
   if (existing) return existing;
   return prisma.workspaceSettings.create({
-    data: { companyName: "StockFlow workspace", primaryCurrency: "ETB", locale: "en" },
+    data: { companyName: "Bensiya PLC", primaryCurrency: "ETB", locale: "en" },
   });
 }
 

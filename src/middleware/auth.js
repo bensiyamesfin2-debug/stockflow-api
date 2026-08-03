@@ -28,6 +28,7 @@ async function authenticate(req, res, next) {
         fullName: true,
         username: true,
         role: true,
+        isPlatformOwner: true,
         isActive: true,
         tokenVersion: true,
       },
@@ -72,7 +73,19 @@ function authorizeRoles(...allowedRoles) {
   };
 }
 
+function authorizePlatformOwner(req, res, next) {
+  if (!req.user?.isPlatformOwner) {
+    return res.status(403).json({
+      success: false,
+      message: "This private Ben IT Solutions area is restricted to the platform owner",
+    });
+  }
+
+  return next();
+}
+
 module.exports = {
   authenticate,
   authorizeRoles,
+  authorizePlatformOwner,
 };

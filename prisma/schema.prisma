@@ -101,6 +101,7 @@ model User {
   invoiceTemplates     InvoiceTemplate[]
   twoFactorSecret      String?              @map("two_factor_secret") @db.VarChar(128)
   twoFactorEnabled     Boolean              @default(false) @map("two_factor_enabled")
+  isPlatformOwner      Boolean              @default(false) @map("is_platform_owner")
 
   @@map("users")
 }
@@ -533,7 +534,7 @@ model Shift {
 
 model WorkspaceSettings {
   id                 Int      @id @default(autoincrement())
-  companyName        String   @default("StockFlow workspace") @map("company_name") @db.VarChar(160)
+  companyName        String   @default("Bensiya PLC") @map("company_name") @db.VarChar(160)
   companyCode        String?  @map("company_code") @db.VarChar(40)
   primaryCurrency    String   @default("ETB") @map("primary_currency") @db.VarChar(3)
   locale             String   @default("en") @db.VarChar(10)
