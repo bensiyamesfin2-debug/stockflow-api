@@ -10,6 +10,8 @@ const {
   listBatches,
   adjustInventory,
   listAuditLogs,
+  listStockTransfers,
+  createStockTransfer,
 } = require("../controllers/inventoryController");
 const { authenticate, authorizeRoles } = require("../middleware/auth");
 
@@ -21,6 +23,8 @@ router.get("/locations", authorizeRoles("ADMIN", "INVENTORY_STAFF"), listLocatio
 router.post("/locations", authorizeRoles("ADMIN"), createLocation);
 router.patch("/locations/:id", authorizeRoles("ADMIN"), updateLocation);
 router.get("/batches", authorizeRoles("ADMIN", "INVENTORY_STAFF"), listBatches);
+router.get("/transfers", authorizeRoles("ADMIN", "INVENTORY_STAFF"), listStockTransfers);
+router.post("/transfers", authorizeRoles("ADMIN", "INVENTORY_STAFF"), createStockTransfer);
 router.post("/adjustments", authorizeRoles("ADMIN", "INVENTORY_STAFF"), adjustInventory);
 router.get("/audit", authorizeRoles("ADMIN"), listAuditLogs);
 router.get(

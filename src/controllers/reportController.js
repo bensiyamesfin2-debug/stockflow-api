@@ -54,6 +54,25 @@ function parseDateRange(query) {
   return { from, to };
 }
 
+function ethiopiaDayKey(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Africa/Addis_Ababa",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function ownerDayRange(value) {
+  const day = value ? String(value).trim() : ethiopiaDayKey();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new HttpError(400, "Use a valid daily dashboard date");
+  const from = new Date(`${day}T00:00:00.000+03:00`);
+  const to = new Date(`${day}T23:59:59.999+03:00`);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) throw new HttpError(400, "Use a valid daily dashboard date");
+  return { day, from, to };
+}
+
 async function findAllById(model, args, batchSize = 2000) {
   const records = [];
   let cursor;
@@ -271,7 +290,7 @@ async function getDashboard(req, res) {
 
 async function getLiveSalesSummary(req, res) {
   const { from, to } = parseDateRange(req.query);
-  const sales = await findAllById(prisma.sale, {
+  const [sales, payments] = await Promise.all([findAllById(prisma.sale, {
     where: {
       createdAt: { gte: from, lte: to },
       status: { not: "CANCELLED" },
@@ -282,25 +301,28 @@ async function getLiveSalesSummary(req, res) {
       totalAmount: true,
       discountAmount: true,
       status: true,
-      payments: {
-        where: { status: "COMPLETED" },
-        select: { amount: true, paymentMethod: true },
-      },
     },
-  });
+  }), findAllById(prisma.payment, {
+    where: { createdAt: { gte: from, lte: to }, status: { in: ["COMPLETED", "REFUNDED"] }, sale: { status: { not: "CANCELLED" }, ...(req.user.role === "CASHIER" ? { cashierId: req.user.id } : {}) } },
+    select: { id: true, amount: true, paymentMethod: true, status: true },
+  })]);
 
-  const completedPayments = sales.flatMap((sale) => sale.payments);
-  const paymentMethods = [...completedPayments.reduce((groups, payment) => {
-    const current = groups.get(payment.paymentMethod) || { count: 0, amounts: [] };
+  const paymentMethods = [...payments.reduce((groups, payment) => {
+    const current = groups.get(payment.paymentMethod) || { count: 0, collected: [], refunded: [] };
     current.count += 1;
-    current.amounts.push(payment.amount);
+    current[payment.status === "REFUNDED" ? "refunded" : "collected"].push(payment.amount);
     groups.set(payment.paymentMethod, current);
     return groups;
   }, new Map())].map(([paymentMethod, values]) => ({
     paymentMethod,
     count: values.count,
-    amount: sumMoney(values.amounts),
+    collected: sumMoney(values.collected),
+    refunded: sumMoney(values.refunded),
+    amount: centsToMoney(moneyToCents(sumMoney(values.collected)) - moneyToCents(sumMoney(values.refunded))),
   }));
+
+  const collectedPayments = payments.filter((payment) => payment.status === "COMPLETED");
+  const refundedPayments = payments.filter((payment) => payment.status === "REFUNDED");
 
   return res.json({
     success: true,
@@ -311,7 +333,11 @@ async function getLiveSalesSummary(req, res) {
         sales: sales.length,
         revenue: sumMoney(sales.map((sale) => sale.totalAmount)),
         discounts: sumMoney(sales.map((sale) => sale.discountAmount)),
-        collected: sumMoney(completedPayments.map((payment) => payment.amount)),
+        collected: centsToMoney(
+          moneyToCents(sumMoney(collectedPayments.map((payment) => payment.amount))) -
+            moneyToCents(sumMoney(refundedPayments.map((payment) => payment.amount)))
+        ),
+        refunded: sumMoney(refundedPayments.map((payment) => payment.amount)),
         awaitingRelease: sales.filter((sale) => ["PENDING_RELEASE", "PARTIALLY_RELEASED"].includes(sale.status)).length,
         completed: sales.filter((sale) => sale.status === "COMPLETED").length,
       },
@@ -353,6 +379,79 @@ async function getCustomerBalances(req, res) {
     data: {
       balances,
       totalOutstanding: centsToMoney(balances.reduce((total, entry) => total + moneyToCents(entry.outstanding), 0n)),
+    },
+  });
+}
+
+async function getOwnerDailySummary(req, res) {
+  const { day, from, to } = ownerDayRange(req.query.date);
+  const salesWhere = { createdAt: { gte: from, lte: to }, status: { not: "CANCELLED" } };
+  const [sales, payments, quotations, pendingReleases, inventory, transfers, creditSales] = await Promise.all([
+    prisma.sale.findMany({
+      where: salesWhere,
+      include: {
+        cashier: { select: { id: true, fullName: true } },
+        items: { include: { product: { select: { id: true, sku: true, name: true, length: true, width: true, thickness: true } } } },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 1000,
+    }),
+    prisma.payment.findMany({
+      where: { createdAt: { gte: from, lte: to }, status: { in: ["COMPLETED", "REFUNDED"] }, sale: { status: { not: "CANCELLED" } } },
+      select: { amount: true, paymentMethod: true, status: true },
+      take: 2000,
+    }),
+    prisma.quotation.findMany({ where: { createdAt: { gte: from, lte: to } }, select: { id: true, status: true, totalAmount: true, totalAreaSqm: true }, take: 1000 }),
+    prisma.sale.count({ where: { status: { in: ["PENDING_RELEASE", "PARTIALLY_RELEASED"] } } }),
+    prisma.inventory.findMany({ include: { product: { select: { id: true, sku: true, name: true, length: true, width: true, thickness: true, isActive: true } } } }),
+    prisma.stockTransfer.count({ where: { createdAt: { gte: from, lte: to } } }),
+    prisma.sale.findMany({ where: { creditBalance: { gt: 0 }, status: { not: "CANCELLED" } }, select: { creditBalance: true, creditDueAt: true }, take: 3000 }),
+  ]);
+
+  const cashiers = [...sales.reduce((groups, sale) => {
+    const current = groups.get(sale.cashier.id) || { cashierId: sale.cashier.id, fullName: sale.cashier.fullName, sales: 0, revenue: [] };
+    current.sales += 1;
+    current.revenue.push(sale.totalAmount);
+    groups.set(sale.cashier.id, current);
+    return groups;
+  }, new Map()).values()].map((entry) => ({ ...entry, revenue: sumMoney(entry.revenue) })).sort((left, right) => Number(right.revenue) - Number(left.revenue));
+
+  const productBuckets = new Map();
+  for (const sale of sales) {
+    for (const item of sale.items) {
+      const current = productBuckets.get(item.productId) || { product: item.product, quantity: 0, revenueCents: 0n };
+      current.quantity += item.quantity;
+      current.revenueCents += moneyToCents(item.unitPrice.toFixed(2)) * BigInt(item.quantity);
+      productBuckets.set(item.productId, current);
+    }
+  }
+  const topProducts = [...productBuckets.values()].map((entry) => ({ product: entry.product, quantity: entry.quantity, revenue: centsToMoney(entry.revenueCents) })).sort((left, right) => right.quantity - left.quantity || Number(right.revenue) - Number(left.revenue)).slice(0, 5);
+  const lowStock = buildLowStockAlerts(inventory);
+  const outstanding = sumMoney(creditSales.map((sale) => sale.creditBalance));
+  const now = new Date();
+  const customerCount = new Set(sales.map((sale) => sale.customerName).filter(Boolean)).size;
+  return res.json({
+    success: true,
+    data: {
+      day,
+      metrics: {
+        sales: sales.length,
+        revenue: sumMoney(sales.map((sale) => sale.totalAmount)),
+        cashCollected: centsToMoney(payments.reduce((total, payment) => total + (payment.status === "REFUNDED" ? -1n : 1n) * moneyToCents(payment.amount.toFixed(2)), 0n)),
+        refunds: sumMoney(payments.filter((payment) => payment.status === "REFUNDED").map((payment) => payment.amount)),
+        newCredit: sumMoney(sales.map((sale) => sale.creditBalance)),
+        totalOutstandingCredit: outstanding,
+        customers: customerCount,
+        pendingReleases,
+        lowStock: lowStock.length,
+        warehouseTransfers: transfers,
+        quotes: quotations.length,
+        quotesAccepted: quotations.filter((quote) => quote.status === "ACCEPTED").length,
+      },
+      cashiers,
+      topProducts,
+      lowStock: lowStock.slice(0, 6),
+      creditAttention: { overdue: creditSales.filter((sale) => sale.creditDueAt && sale.creditDueAt < now).length, totalOutstanding: outstanding },
     },
   });
 }
@@ -441,17 +540,24 @@ async function getPaymentReport(req, res) {
   const completed = payments.filter(
     (payment) => payment.status === "COMPLETED" && payment.sale.status !== "CANCELLED"
   );
+  const refunded = payments.filter(
+    (payment) => payment.status === "REFUNDED" && payment.sale.status !== "CANCELLED"
+  );
 
-  const byMethod = [...completed.reduce((groups, payment) => {
-    const current = groups.get(payment.paymentMethod) || { count: 0, amounts: [] };
+  const byMethod = [...[...completed, ...refunded].reduce((groups, payment) => {
+    const current = groups.get(payment.paymentMethod) || { count: 0, collected: [], refunded: [] };
     current.count += 1;
-    current.amounts.push(payment.amount);
+    current[payment.status === "REFUNDED" ? "refunded" : "collected"].push(payment.amount);
     groups.set(payment.paymentMethod, current);
     return groups;
   }, new Map())].map(([paymentMethod, values]) => ({
     paymentMethod,
     count: values.count,
-    amount: sumMoney(values.amounts),
+    collected: sumMoney(values.collected),
+    refunded: sumMoney(values.refunded),
+    amount: centsToMoney(
+      moneyToCents(sumMoney(values.collected)) - moneyToCents(sumMoney(values.refunded))
+    ),
   }));
 
   const byBank = [...completed
@@ -472,7 +578,11 @@ async function getPaymentReport(req, res) {
     success: true,
     data: {
       range: { from, to },
-      totalCollected: sumMoney(completed.map((payment) => payment.amount)),
+      totalCollected: centsToMoney(
+        moneyToCents(sumMoney(completed.map((payment) => payment.amount))) -
+          moneyToCents(sumMoney(refunded.map((payment) => payment.amount)))
+      ),
+      totalRefunded: sumMoney(refunded.map((payment) => payment.amount)),
       byMethod,
       byBank,
       payments,
@@ -852,6 +962,7 @@ module.exports = {
   getDashboard,
   getLiveSalesSummary,
   getCustomerBalances,
+  getOwnerDailySummary,
   getSalesReport,
   getPaymentReport,
   getProfitReport,

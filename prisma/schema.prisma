@@ -17,6 +17,8 @@ enum SaleStatus {
   PARTIALLY_RELEASED
   COMPLETED
   CANCELLED
+  PARTIALLY_RETURNED
+  RETURNED
 }
 
 enum PaymentMethod {
@@ -39,6 +41,8 @@ enum InventoryMovementType {
   DAMAGE_OUT
   ADJUSTMENT_IN
   ADJUSTMENT_OUT
+  TRANSFER_OUT
+  TRANSFER_IN
 }
 
 enum PurchaseOrderStatus {
@@ -63,6 +67,15 @@ enum DiscountType {
 enum ShiftStatus {
   OPEN
   CLOSED
+}
+
+enum QuotationStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  DECLINED
+  EXPIRED
+  CANCELLED
 }
 
 model User {
@@ -100,6 +113,10 @@ model User {
   attachments          FileAttachment[]
   invoiceTemplates     InvoiceTemplate[]
   deliveryProofs       DeliveryProof[]     @relation("DeliveredBy")
+  priceListsCreated    PriceList[]         @relation("PriceListsCreated")
+  stockTransfers       StockTransfer[]     @relation("TransfersCreated")
+  quotations           Quotation[]         @relation("QuotationsCreated")
+  saleReturnsProcessed SaleReturn[]        @relation("SaleReturnsProcessed")
   twoFactorSecret      String?              @map("two_factor_secret") @db.VarChar(128)
   twoFactorEnabled     Boolean              @default(false) @map("two_factor_enabled")
   isPlatformOwner      Boolean              @default(false) @map("is_platform_owner")
@@ -144,6 +161,9 @@ model Product {
   stockCountItems    StockCountItem[]
   locationBalances   InventoryLocationBalance[]
   stockBatches       StockBatch[]
+  priceListItems     PriceListItem[]
+  transferItems      StockTransferItem[]
+  quotationItems     QuotationItem[]
 
   @@index([categoryId])
   @@map("products")
@@ -185,9 +205,12 @@ model Sale {
   payments           Payment[]
   releases           InventoryRelease[]
   notifications      Notification[]
+  returns            SaleReturn[]
   customer           Customer?          @relation(fields: [customerId], references: [id], onDelete: SetNull)
   discount           Discount?          @relation(fields: [discountId], references: [id], onDelete: SetNull)
   shift              Shift?             @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  priceList          PriceList?         @relation(fields: [priceListId], references: [id], onDelete: SetNull)
+  priceListId        Int?               @map("price_list_id")
 
   @@index([cashierId])
   @@index([customerId])
@@ -205,6 +228,7 @@ model SaleItem {
   unitPrice          Decimal                @map("unit_price") @db.Decimal(12, 2)
   costPriceAtSale    Decimal?               @map("cost_price_at_sale") @db.Decimal(12, 2)
   releasedQuantity   Int                    @default(0) @map("released_quantity")
+  returnedQuantity   Int                    @default(0) @map("returned_quantity")
   customLength       Int?                   @map("custom_length")
   customWidth        Int?                   @map("custom_width")
   customThickness    Int?                   @map("custom_thickness")
@@ -213,6 +237,7 @@ model SaleItem {
   sale               Sale                   @relation(fields: [saleId], references: [id], onDelete: Cascade)
   product            Product                @relation(fields: [productId], references: [id], onDelete: Restrict)
   releaseItems       InventoryReleaseItem[]
+  returnItems        SaleReturnItem[]
 
   @@index([saleId, productId])
   @@index([productId])
@@ -341,6 +366,9 @@ model InventoryLocation {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
   balances  InventoryLocationBalance[]
   batches   StockBatch[]
+  transfersFrom StockTransfer[] @relation("TransferFrom")
+  transfersTo   StockTransfer[] @relation("TransferTo")
+  returnItems   SaleReturnItem[]
 
   @@map("inventory_locations")
 }
@@ -379,6 +407,7 @@ model StockBatch {
   supplier          Supplier?          @relation(fields: [supplierId], references: [id], onDelete: SetNull)
   location          InventoryLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
   receiptItem       StockReceiptItem?
+  transferItems     StockTransferItem[]
 
   @@index([productId, availableQuantity])
   @@index([locationId])
@@ -403,6 +432,148 @@ model DeliveryProof {
 
   @@index([deliveredAt])
   @@map("delivery_proofs")
+}
+
+model PriceList {
+  id          Int             @id @default(autoincrement())
+  name        String          @unique @db.VarChar(120)
+  description String?
+  isActive    Boolean         @default(true) @map("is_active")
+  isDefault   Boolean         @default(false) @map("is_default")
+  createdById Int             @map("created_by_id")
+  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy   User            @relation("PriceListsCreated", fields: [createdById], references: [id], onDelete: Restrict)
+  items       PriceListItem[]
+  customers   Customer[]
+  sales       Sale[]
+
+  @@map("price_lists")
+}
+
+model PriceListItem {
+  id          Int       @id @default(autoincrement())
+  priceListId Int       @map("price_list_id")
+  productId   Int       @map("product_id")
+  price       Decimal   @db.Decimal(12, 2)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  priceList   PriceList @relation(fields: [priceListId], references: [id], onDelete: Cascade)
+  product     Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([priceListId, productId])
+  @@index([productId])
+  @@map("price_list_items")
+}
+
+model StockTransfer {
+  id             Int                    @id @default(autoincrement())
+  transferNumber String                 @unique @map("transfer_number") @db.VarChar(60)
+  fromLocationId Int                    @map("from_location_id")
+  toLocationId   Int                    @map("to_location_id")
+  transferredById Int                   @map("transferred_by_id")
+  notes          String?
+  createdAt      DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
+  fromLocation   InventoryLocation      @relation("TransferFrom", fields: [fromLocationId], references: [id], onDelete: Restrict)
+  toLocation     InventoryLocation      @relation("TransferTo", fields: [toLocationId], references: [id], onDelete: Restrict)
+  transferredBy  User                   @relation("TransfersCreated", fields: [transferredById], references: [id], onDelete: Restrict)
+  items          StockTransferItem[]
+
+  @@index([fromLocationId, createdAt])
+  @@index([toLocationId, createdAt])
+  @@map("stock_transfers")
+}
+
+model StockTransferItem {
+  id         Int           @id @default(autoincrement())
+  transferId Int           @map("transfer_id")
+  productId  Int           @map("product_id")
+  batchId    Int?          @map("batch_id")
+  quantity   Int
+  transfer   StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  product    Product       @relation(fields: [productId], references: [id], onDelete: Restrict)
+  batch      StockBatch?   @relation(fields: [batchId], references: [id], onDelete: SetNull)
+
+  @@index([productId])
+  @@index([batchId])
+  @@map("stock_transfer_items")
+}
+
+model Quotation {
+  id             Int             @id @default(autoincrement())
+  quoteNumber    String          @unique @map("quote_number") @db.VarChar(60)
+  customerId     Int?            @map("customer_id")
+  customerName   String?         @map("customer_name") @db.VarChar(150)
+  customerPhone  String?         @map("customer_phone") @db.VarChar(40)
+  createdById    Int             @map("created_by_id")
+  status         QuotationStatus @default(DRAFT)
+  validUntil     DateTime?       @map("valid_until") @db.Timestamptz(3)
+  notes          String?
+  totalAreaSqm   Decimal         @default(0) @map("total_area_sqm") @db.Decimal(14, 3)
+  totalAmount    Decimal         @default(0) @map("total_amount") @db.Decimal(12, 2)
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  customer       Customer?       @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  createdBy      User            @relation("QuotationsCreated", fields: [createdById], references: [id], onDelete: Restrict)
+  items          QuotationItem[]
+
+  @@index([customerId, createdAt])
+  @@index([status, createdAt])
+  @@map("quotations")
+}
+
+model QuotationItem {
+  id              Int       @id @default(autoincrement())
+  quotationId     Int       @map("quotation_id")
+  productId       Int       @map("product_id")
+  description     String?   @db.VarChar(240)
+  lengthCm        Int       @map("length_cm")
+  widthCm         Int       @map("width_cm")
+  thicknessCm     Int?      @map("thickness_cm")
+  quantity        Int
+  areaSqm         Decimal   @map("area_sqm") @db.Decimal(14, 3)
+  unitPricePerSqm Decimal   @map("unit_price_per_sqm") @db.Decimal(12, 2)
+  lineTotal       Decimal   @map("line_total") @db.Decimal(12, 2)
+  quotation       Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  product         Product   @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([quotationId])
+  @@index([productId])
+  @@map("quotation_items")
+}
+
+model SaleReturn {
+  id            Int            @id @default(autoincrement())
+  returnNumber  String         @unique @map("return_number") @db.VarChar(60)
+  saleId        Int            @map("sale_id")
+  processedById Int            @map("processed_by_id")
+  reason        String
+  returnValue   Decimal        @map("return_value") @db.Decimal(12, 2)
+  refundAmount  Decimal        @default(0) @map("refund_amount") @db.Decimal(12, 2)
+  refundMethod  PaymentMethod? @map("refund_method")
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  sale          Sale           @relation(fields: [saleId], references: [id], onDelete: Restrict)
+  processedBy   User           @relation("SaleReturnsProcessed", fields: [processedById], references: [id], onDelete: Restrict)
+  items         SaleReturnItem[]
+
+  @@index([saleId, createdAt])
+  @@map("sale_returns")
+}
+
+model SaleReturnItem {
+  id           Int          @id @default(autoincrement())
+  returnId     Int          @map("return_id")
+  saleItemId   Int          @map("sale_item_id")
+  quantity     Int
+  restocked    Boolean      @default(true)
+  locationId   Int?         @map("location_id")
+  saleReturn   SaleReturn   @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  saleItem     SaleItem     @relation(fields: [saleItemId], references: [id], onDelete: Restrict)
+  location     InventoryLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  @@index([saleItemId])
+  @@index([locationId])
+  @@map("sale_return_items")
 }
 
 model AuditLog {
@@ -504,13 +675,17 @@ model Customer {
   email     String?  @db.VarChar(254)
   address   String?
   notes     String?
+  priceListId Int?      @map("price_list_id")
   isActive  Boolean  @default(true) @map("is_active")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
   sales     Sale[]
+  quotations Quotation[]
+  priceList PriceList?  @relation(fields: [priceListId], references: [id], onDelete: SetNull)
 
   @@index([name])
   @@index([phone])
+  @@index([priceListId])
   @@map("customers")
 }
 

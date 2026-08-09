@@ -19,9 +19,12 @@ const shiftRoutes = require("./routes/shiftRoutes");
 const stockCountRoutes = require("./routes/stockCountRoutes");
 const supplierRoutes = require("./routes/supplierRoutes");
 const purchaseOrderRoutes = require("./routes/purchaseOrderRoutes");
+const priceListRoutes = require("./routes/priceListRoutes");
+const quotationRoutes = require("./routes/quotationRoutes");
 const testRoutes = require("./routes/testRoutes");
 const userRoutes = require("./routes/userRoutes");
 const workspaceRoutes = require("./routes/workspaceRoutes");
+const whatsappRoutes = require("./routes/whatsappRoutes");
 const { authenticate, authorizeRoles } = require("./middleware/auth");
 
 const app = express();
@@ -73,6 +76,25 @@ app.use(
 );
 app.use(express.json({ limit: "1mb" }));
 
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  const requestId = req.get("x-request-id") || require("crypto").randomUUID();
+  req.requestId = requestId;
+  res.setHeader("X-Request-Id", requestId);
+  res.on("finish", () => {
+    console.log(JSON.stringify({
+      level: res.statusCode >= 500 ? "error" : "info",
+      event: "http_request",
+      requestId,
+      method: req.method,
+      path: req.originalUrl.split("?")[0],
+      status: res.statusCode,
+      durationMs: Date.now() - startedAt,
+    }));
+  });
+  next();
+});
+
 app.get("/", (req, res) => {
   res.json({
     success: true,
@@ -87,6 +109,8 @@ app.get("/api/health", async (req, res) => {
     return res.json({
       success: true,
       message: "Inventory backend and database are ready",
+      instanceCompanyCode: process.env.INSTANCE_COMPANY_CODE || "bensiya-plc",
+      dataIsolationMode: "DEDICATED_DATABASE",
     });
   } catch (error) {
     console.error("Health check failed:", error.message);
@@ -103,7 +127,9 @@ app.use("/api/customers", customerRoutes);
 app.use("/api/discounts", discountRoutes);
 app.use("/api/exports", exportRoutes);
 app.use("/api/products", productRoutes);
+app.use("/api/price-lists", priceListRoutes);
 app.use("/api/purchase-orders", purchaseOrderRoutes);
+app.use("/api/quotations", quotationRoutes);
 app.use("/api/releases", releaseRoutes);
 app.use("/api/reports", reportRoutes);
 app.use("/api/sales", saleRoutes);
@@ -116,6 +142,7 @@ app.use("/api/leads", leadRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/workspace", workspaceRoutes);
+app.use("/api/whatsapp", whatsappRoutes);
 app.use(
   "/api/test",
   authenticate,
@@ -143,11 +170,12 @@ app.use((error, req, res, next) => {
     });
   }
 
-  console.error("Unhandled request error:", error);
+  console.error(JSON.stringify({ level: "error", event: "unhandled_request_error", requestId: req.requestId, message: error.message, stack: error.stack }));
 
   return res.status(500).json({
     success: false,
     message: "An unexpected server error occurred",
+    requestId: req.requestId,
   });
 });
 

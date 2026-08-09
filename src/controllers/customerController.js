@@ -28,6 +28,14 @@ function normalizeCustomer(body, partial = false) {
     if (typeof body.isActive !== "boolean") errors.push("isActive must be true or false");
     else data.isActive = body.isActive;
   }
+  if (body.priceListId !== undefined) {
+    if (body.priceListId === null || body.priceListId === "") data.priceListId = null;
+    else {
+      const priceListId = Number(body.priceListId);
+      if (!Number.isInteger(priceListId) || priceListId <= 0) errors.push("Price list is invalid");
+      else data.priceListId = priceListId;
+    }
+  }
   return { data, errors };
 }
 
@@ -52,7 +60,7 @@ async function listCustomers(req, res) {
   };
   const customers = await prisma.customer.findMany({
     where,
-    include: { _count: { select: { sales: true } } },
+    include: { _count: { select: { sales: true } }, priceList: { select: { id: true, name: true, isActive: true } } },
     orderBy: { name: "asc" },
     take: 500,
   });
@@ -62,6 +70,10 @@ async function listCustomers(req, res) {
 async function createCustomer(req, res) {
   const { data, errors } = normalizeCustomer(req.body);
   if (errors.length) return res.status(400).json({ success: false, message: errors[0], errors });
+  if (data.priceListId) {
+    const priceList = await prisma.priceList.findFirst({ where: { id: data.priceListId, isActive: true } });
+    if (!priceList) return res.status(400).json({ success: false, message: "Price list does not exist or is inactive" });
+  }
   const customer = await prisma.$transaction(async (transaction) => {
     const created = await transaction.customer.create({ data });
     await transaction.auditLog.create({
@@ -78,6 +90,10 @@ async function updateCustomer(req, res) {
   const { data, errors } = normalizeCustomer(req.body, true);
   if (errors.length) return res.status(400).json({ success: false, message: errors[0], errors });
   if (!Object.keys(data).length) return res.status(400).json({ success: false, message: "Provide at least one customer field to update" });
+  if (data.priceListId) {
+    const priceList = await prisma.priceList.findFirst({ where: { id: data.priceListId, isActive: true } });
+    if (!priceList) return res.status(400).json({ success: false, message: "Price list does not exist or is inactive" });
+  }
   const customer = await prisma.$transaction(async (transaction) => {
     const existing = await transaction.customer.findUnique({ where: { id: customerId } });
     if (!existing) return null;

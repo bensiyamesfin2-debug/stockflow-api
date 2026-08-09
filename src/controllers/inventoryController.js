@@ -1,5 +1,6 @@
 const { randomUUID } = require("crypto");
 const prisma = require("../config/prisma");
+const HttpError = require("../utils/HttpError");
 const { normalizeMoney } = require("../utils/validation");
 const { runSerializableTransaction } = require("../utils/transaction");
 
@@ -13,6 +14,11 @@ function makeReceiptNumber() {
 
 function makeBatchNumber(receiptNumber, itemIndex) {
   return `${receiptNumber}-B${String(itemIndex + 1).padStart(2, "0")}`;
+}
+
+function makeTransferNumber() {
+  const date = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+  return `MOVE-${date}-${randomUUID().slice(0, 8).toUpperCase()}`;
 }
 
 function cleanText(value, limit) {
@@ -534,6 +540,97 @@ async function listAuditLogs(req, res) {
   return res.json({ success: true, data: { logs } });
 }
 
+function normalizeTransfer(body) {
+  const fromLocationId = Number(body.fromLocationId);
+  const toLocationId = Number(body.toLocationId);
+  const notes = optionalText(body.notes, 2000);
+  const errors = [];
+  if (!Number.isInteger(fromLocationId) || fromLocationId <= 0) errors.push("Choose a source warehouse location");
+  if (!Number.isInteger(toLocationId) || toLocationId <= 0) errors.push("Choose a destination warehouse location");
+  if (fromLocationId === toLocationId) errors.push("Source and destination locations must be different");
+  if (body.notes && !notes) errors.push("Transfer note cannot exceed 2,000 characters");
+  if (!Array.isArray(body.items) || body.items.length === 0 || body.items.length > 100) errors.push("A transfer needs between 1 and 100 stock lines");
+  const seen = new Set();
+  const items = Array.isArray(body.items) ? body.items.map((rawItem, index) => {
+    const productId = Number(rawItem?.productId);
+    const quantity = Number(rawItem?.quantity);
+    const batchId = rawItem?.batchId === undefined || rawItem?.batchId === null || rawItem?.batchId === "" ? null : Number(rawItem.batchId);
+    if (!Number.isInteger(productId) || productId <= 0) errors.push(`Transfer line ${index + 1} has an invalid product`);
+    if (!Number.isInteger(quantity) || quantity <= 0) errors.push(`Transfer line ${index + 1} quantity must be a positive whole number`);
+    if (batchId !== null && (!Number.isInteger(batchId) || batchId <= 0)) errors.push(`Transfer line ${index + 1} has an invalid batch`);
+    const key = `${productId}:${batchId ?? "none"}`;
+    if (seen.has(key)) errors.push(`Transfer line ${index + 1} repeats a product or batch`);
+    seen.add(key);
+    return { productId, quantity, batchId };
+  }) : [];
+  return { data: { fromLocationId, toLocationId, notes, items }, errors };
+}
+
+const transferInclude = {
+  fromLocation: { select: { id: true, code: true, name: true } },
+  toLocation: { select: { id: true, code: true, name: true } },
+  transferredBy: { select: { id: true, fullName: true, username: true } },
+  items: { include: { product: { select: { id: true, sku: true, name: true, length: true, width: true, thickness: true } }, batch: { select: { id: true, batchNumber: true } } } },
+};
+
+async function listStockTransfers(req, res) {
+  const transfers = await prisma.stockTransfer.findMany({ take: 100, include: transferInclude, orderBy: { createdAt: "desc" } });
+  return res.json({ success: true, data: { transfers } });
+}
+
+async function createStockTransfer(req, res) {
+  const { data, errors } = normalizeTransfer(req.body);
+  if (errors.length) return res.status(400).json({ success: false, message: errors[0], errors });
+  const transfer = await runSerializableTransaction(async (transaction) => {
+    const productIds = [...new Set(data.items.map((item) => item.productId))];
+    const [locations, inventory, batches, sourceBalances] = await Promise.all([
+      transaction.inventoryLocation.findMany({ where: { id: { in: [data.fromLocationId, data.toLocationId] }, isActive: true } }),
+      transaction.inventory.findMany({ where: { productId: { in: productIds } }, include: { product: { select: { id: true, isActive: true, name: true } } } }),
+      transaction.stockBatch.findMany({ where: { id: { in: data.items.map((item) => item.batchId).filter(Boolean) } } }),
+      transaction.inventoryLocationBalance.findMany({ where: { locationId: data.fromLocationId, productId: { in: productIds } } }),
+    ]);
+    if (locations.length !== 2) throw new HttpError(400, "Source or destination warehouse location is unavailable");
+    if (inventory.length !== productIds.length || inventory.some((record) => !record.product.isActive)) throw new HttpError(400, "One or more transfer products do not have active inventory");
+    const inventoryByProduct = new Map(inventory.map((record) => [record.productId, record]));
+    const batchesById = new Map(batches.map((batch) => [batch.id, batch]));
+    const requiredByProduct = data.items.reduce((totals, item) => totals.set(item.productId, (totals.get(item.productId) || 0) + item.quantity), new Map());
+    const sourceByProduct = new Map(sourceBalances.map((balance) => [balance.productId, balance]));
+    for (const [productId, quantity] of requiredByProduct) {
+      const source = sourceByProduct.get(productId);
+      if (!source || source.quantity < quantity) {
+        const product = inventoryByProduct.get(productId).product;
+        throw new HttpError(409, `${product.name} does not have ${quantity} unit(s) at the selected source location`);
+      }
+    }
+    for (const item of data.items) {
+      if (!item.batchId) continue;
+      const batch = batchesById.get(item.batchId);
+      if (!batch || batch.productId !== item.productId) throw new HttpError(400, "A selected batch does not belong to its transfer product");
+      if (batch.locationId !== data.fromLocationId) throw new HttpError(409, "The selected batch is not currently assigned to the source location");
+      if (batch.availableQuantity < item.quantity) throw new HttpError(409, "The selected batch does not have enough available units");
+    }
+
+    const created = await transaction.stockTransfer.create({ data: { transferNumber: makeTransferNumber(), fromLocationId: data.fromLocationId, toLocationId: data.toLocationId, transferredById: req.user.id, notes: data.notes } });
+    for (const item of data.items) {
+      const inventoryRecord = inventoryByProduct.get(item.productId);
+      await transaction.stockTransferItem.create({ data: { transferId: created.id, productId: item.productId, batchId: item.batchId, quantity: item.quantity } });
+      if (item.batchId) {
+        const batch = batchesById.get(item.batchId);
+        if (batch.availableQuantity === item.quantity) await transaction.stockBatch.update({ where: { id: batch.id }, data: { locationId: data.toLocationId } });
+      }
+      await transaction.inventoryMovement.create({ data: { productId: item.productId, movementType: "TRANSFER_OUT", quantityChange: 0, balanceAfter: inventoryRecord.quantity, referenceType: "STOCK_TRANSFER", referenceId: created.id, createdById: req.user.id, notes: `Moved ${item.quantity} from location ${data.fromLocationId} to ${data.toLocationId}` } });
+      await transaction.inventoryMovement.create({ data: { productId: item.productId, movementType: "TRANSFER_IN", quantityChange: 0, balanceAfter: inventoryRecord.quantity, referenceType: "STOCK_TRANSFER", referenceId: created.id, createdById: req.user.id, notes: `Received ${item.quantity} from location ${data.fromLocationId} to ${data.toLocationId}` } });
+    }
+    for (const [productId, quantity] of requiredByProduct) {
+      await transaction.inventoryLocationBalance.update({ where: { locationId_productId: { locationId: data.fromLocationId, productId } }, data: { quantity: { decrement: quantity } } });
+      await transaction.inventoryLocationBalance.upsert({ where: { locationId_productId: { locationId: data.toLocationId, productId } }, create: { locationId: data.toLocationId, productId, quantity }, update: { quantity: { increment: quantity } } });
+    }
+    await transaction.auditLog.create({ data: { userId: req.user.id, action: "TRANSFER_STOCK", entityType: "STOCK_TRANSFER", entityId: created.id, details: { fromLocationId: data.fromLocationId, toLocationId: data.toLocationId, items: data.items } } });
+    return transaction.stockTransfer.findUnique({ where: { id: created.id }, include: transferInclude });
+  });
+  return res.status(201).json({ success: true, message: "Stock transferred between warehouse locations", data: { transfer } });
+}
+
 module.exports = {
   listInventory,
   createStockReceipt,
@@ -545,4 +642,7 @@ module.exports = {
   listBatches,
   adjustInventory,
   listAuditLogs,
+  listStockTransfers,
+  createStockTransfer,
+  normalizeTransfer,
 };

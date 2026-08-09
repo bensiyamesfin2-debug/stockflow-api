@@ -4,12 +4,13 @@ const HttpError = require("../utils/HttpError");
 const { moneyToCents, centsToMoney } = require("../utils/money");
 const { runSerializableTransaction } = require("../utils/transaction");
 const { normalizeClientRequestId } = require("../utils/clientRequestId");
-const { sellableUnitPriceCents } = require("../utils/salePricing");
+const { resolveCustomerPriceList, saleUnitPriceCents } = require("../utils/priceLists");
 const { calculateDiscountCents } = require("../utils/discounts");
 const { buildSaleNotification } = require("../utils/saleNotification");
 const {
   sendNewSalePushNotification,
 } = require("../utils/pushNotifications");
+const { deliverWhatsAppText, saleWhatsAppMessage } = require("../utils/whatsapp");
 const {
   planCustomCuts,
   normalizeCustomMeasurement,
@@ -26,6 +27,8 @@ const SALE_STATUSES = new Set([
   "PARTIALLY_RELEASED",
   "COMPLETED",
   "CANCELLED",
+  "PARTIALLY_RETURNED",
+  "RETURNED",
 ]);
 
 const saleInclude = {
@@ -47,6 +50,10 @@ const saleInclude = {
     },
   },
   payments: true,
+  returns: {
+    include: { items: true },
+    orderBy: { createdAt: "desc" },
+  },
   customer: {
     select: { id: true, name: true, phone: true, email: true },
   },
@@ -56,6 +63,7 @@ const saleInclude = {
   shift: {
     select: { id: true, status: true, openedAt: true, closedAt: true },
   },
+  priceList: { select: { id: true, name: true } },
   releases: {
     select: {
       id: true,
@@ -71,13 +79,28 @@ function makeSaleNumber() {
   return `SALE-${date}-${randomUUID().slice(0, 8).toUpperCase()}`;
 }
 
+function makeReturnNumber() {
+  const date = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+  return `RET-${date}-${randomUUID().slice(0, 8).toUpperCase()}`;
+}
+
 function serializeSale(sale) {
   const { clientRequestId, ...publicSale } = sale;
+  const completedCents = (sale.payments || []).filter((payment) => payment.status === "COMPLETED").reduce((total, payment) => total + moneyToCents(payment.amount.toFixed(2)), 0n);
+  const refundedCents = (sale.payments || []).filter((payment) => payment.status === "REFUNDED").reduce((total, payment) => total + moneyToCents(payment.amount.toFixed(2)), 0n);
+  const returnedCents = (sale.returns || []).reduce((total, record) => total + moneyToCents(record.returnValue.toFixed(2)), 0n);
+  const payableCents = [moneyToCents(sale.totalAmount.toFixed(2)) - returnedCents, 0n].reduce((maximum, value) => value > maximum ? value : maximum, 0n);
+  const netPaidCents = completedCents > refundedCents ? completedCents - refundedCents : 0n;
+  const paymentStatus = sale.status === "CANCELLED" ? "VOIDED" : sale.status === "RETURNED" && payableCents === 0n ? "REFUNDED" : netPaidCents <= 0n ? "UNPAID" : netPaidCents < payableCents ? "PARTIAL" : "PAID";
   return {
     ...publicSale,
+    paymentStatus,
+    returnedAmount: centsToMoney(returnedCents),
+    netAmount: centsToMoney(payableCents),
     items: sale.items.map((item) => ({
       ...item,
       remainingQuantity: item.quantity - item.releasedQuantity,
+      returnableQuantity: item.releasedQuantity - item.returnedQuantity,
     })),
   };
 }
@@ -319,6 +342,14 @@ async function createSale(req, res) {
 
     const productsById = new Map(products.map((product) => [product.id, product]));
     applySharedCustomCutPlans(data.items, productsById);
+    let customer = null;
+    if (data.customerId !== null) {
+      customer = await transaction.customer.findUnique({ where: { id: data.customerId } });
+      if (!customer || !customer.isActive) {
+        throw new HttpError(400, "Customer does not exist or is inactive");
+      }
+    }
+    const { priceList, pricesByProduct } = await resolveCustomerPriceList(transaction, customer);
     let subtotalCents = 0n;
     const requestedQuantityByProduct = new Map();
 
@@ -333,18 +364,11 @@ async function createSale(req, res) {
         product.id,
         (requestedQuantityByProduct.get(product.id) || 0) + item.quantity
       );
-      subtotalCents += sellableUnitPriceCents(product) * BigInt(item.quantity);
+      item.unitPriceCents = saleUnitPriceCents(product, pricesByProduct);
+      subtotalCents += item.unitPriceCents * BigInt(item.quantity);
     }
 
     ensureRequestedStockIsAvailable(productsById, requestedQuantityByProduct);
-
-    let customer = null;
-    if (data.customerId !== null) {
-      customer = await transaction.customer.findUnique({ where: { id: data.customerId } });
-      if (!customer || !customer.isActive) {
-        throw new HttpError(400, "Customer does not exist or is inactive");
-      }
-    }
 
     let discount = null;
     if (data.discountId !== null || data.discountCode) {
@@ -396,6 +420,7 @@ async function createSale(req, res) {
         cashierId: req.user.id,
         customerId: customer?.id || null,
         customerName: customer?.name || data.customerName,
+        priceListId: priceList?.id || null,
         discountId: discount?.id || null,
         discountAmount: centsToMoney(discountCents),
         shiftId: activeShift?.id || null,
@@ -420,7 +445,7 @@ async function createSale(req, res) {
           saleId: createdSale.id,
           productId: product.id,
           quantity: item.quantity,
-          unitPrice: product.sellingPrice,
+          unitPrice: centsToMoney(item.unitPriceCents),
           costPriceAtSale: product.costPrice,
           customLength: item.customMeasurement?.length || null,
           customWidth: item.customMeasurement?.width || null,
@@ -481,6 +506,7 @@ async function createSale(req, res) {
           notifiedInventoryStaff: inventoryStaff.length,
           paymentMethods: data.payments.map((payment) => payment.paymentMethod),
           customerId: customer?.id || null,
+          priceListId: priceList?.id || null,
           discountId: discount?.id || null,
           discountAmount: centsToMoney(discountCents),
           shiftId: activeShift?.id || null,
@@ -521,6 +547,10 @@ async function createSale(req, res) {
       message: result.notification.message,
     }).catch((error) => {
       console.error("Unable to prepare sale push notifications:", error.message);
+    });
+    void deliverWhatsAppText({
+      phone: result.sale.customer?.phone,
+      message: saleWhatsAppMessage(result.sale),
     });
   }
 
@@ -590,6 +620,14 @@ async function updateSale(req, res) {
       products.map((product) => [product.id, product])
     );
     applySharedCustomCutPlans(data.items, productsById);
+    let customer = null;
+    if (data.customerId !== null) {
+      customer = await transaction.customer.findUnique({ where: { id: data.customerId } });
+      if (!customer || !customer.isActive) {
+        throw new HttpError(400, "Customer does not exist or is inactive");
+      }
+    }
+    const { priceList, pricesByProduct } = await resolveCustomerPriceList(transaction, customer);
     const currentQuantityByProduct = sumQuantityByProduct(existingSale.items);
     let subtotalCents = 0n;
     const requestedQuantityByProduct = new Map();
@@ -608,7 +646,8 @@ async function updateSale(req, res) {
         product.id,
         (requestedQuantityByProduct.get(product.id) || 0) + item.quantity
       );
-      subtotalCents += sellableUnitPriceCents(product) * BigInt(item.quantity);
+      item.unitPriceCents = saleUnitPriceCents(product, pricesByProduct);
+      subtotalCents += item.unitPriceCents * BigInt(item.quantity);
     }
 
     ensureRequestedStockIsAvailable(
@@ -616,14 +655,6 @@ async function updateSale(req, res) {
       requestedQuantityByProduct,
       currentQuantityByProduct
     );
-
-    let customer = null;
-    if (data.customerId !== null) {
-      customer = await transaction.customer.findUnique({ where: { id: data.customerId } });
-      if (!customer || !customer.isActive) {
-        throw new HttpError(400, "Customer does not exist or is inactive");
-      }
-    }
 
     let discount = null;
     if (data.discountId !== null || data.discountCode) {
@@ -685,7 +716,7 @@ async function updateSale(req, res) {
           saleId,
           productId: product.id,
           quantity: item.quantity,
-          unitPrice: product.sellingPrice,
+          unitPrice: centsToMoney(item.unitPriceCents),
           costPriceAtSale: product.costPrice,
           customLength: item.customMeasurement?.length || null,
           customWidth: item.customMeasurement?.width || null,
@@ -719,6 +750,7 @@ async function updateSale(req, res) {
       data: {
         customerId: customer?.id || null,
         customerName: customer?.name || data.customerName,
+        priceListId: priceList?.id || null,
         discountId: discount?.id || null,
         discountAmount: centsToMoney(discountCents),
         totalAmount: centsToMoney(totalCents),
@@ -753,6 +785,7 @@ async function updateSale(req, res) {
             (payment) => payment.paymentMethod
           ),
           customerId: customer?.id || null,
+          priceListId: priceList?.id || null,
           discountId: discount?.id || null,
           discountAmount: centsToMoney(discountCents),
           creditBalance: centsToMoney(creditBalanceCents),
@@ -974,6 +1007,77 @@ async function cancelSale(req, res) {
   });
 }
 
+async function returnSale(req, res) {
+  const saleId = Number(req.params.id);
+  const reason = String(req.body.reason || "").trim();
+  const refundMethod = req.body.refundMethod ? String(req.body.refundMethod).trim().toUpperCase() : null;
+  const refundCents = req.body.refundAmount === undefined || req.body.refundAmount === "" ? 0n : moneyToCents(req.body.refundAmount);
+  const rawItems = req.body.items;
+  if (!Number.isInteger(saleId) || saleId <= 0) throw new HttpError(400, "Invalid sale ID");
+  if (reason.length < 3 || reason.length > 1000) throw new HttpError(400, "Return reason must be between 3 and 1,000 characters");
+  if (!Array.isArray(rawItems) || rawItems.length === 0 || rawItems.length > 100) throw new HttpError(400, "Choose at least one returned sale item");
+  if (refundCents === null || refundCents < 0n) throw new HttpError(400, "Refund amount is invalid");
+  if (refundCents > 0n && !PAYMENT_METHODS.has(refundMethod)) throw new HttpError(400, "Choose how the refund was paid");
+  const seen = new Set();
+  const items = rawItems.map((rawItem, index) => {
+    const saleItemId = Number(rawItem?.saleItemId);
+    const quantity = Number(rawItem?.quantity);
+    const restocked = rawItem?.restocked !== false;
+    const locationId = rawItem?.locationId === undefined || rawItem?.locationId === null || rawItem?.locationId === "" ? null : Number(rawItem.locationId);
+    if (!Number.isInteger(saleItemId) || saleItemId <= 0 || !Number.isInteger(quantity) || quantity <= 0) throw new HttpError(400, `Return line ${index + 1} is invalid`);
+    if (seen.has(saleItemId)) throw new HttpError(400, `Sale item ${saleItemId} appears more than once`);
+    if (locationId !== null && (!Number.isInteger(locationId) || locationId <= 0)) throw new HttpError(400, `Return line ${index + 1} has an invalid location`);
+    seen.add(saleItemId);
+    return { saleItemId, quantity, restocked, locationId };
+  });
+
+  const returnedSale = await runSerializableTransaction(async (transaction) => {
+    const sale = await transaction.sale.findUnique({ where: { id: saleId }, include: { payments: true, items: { include: { product: { include: { inventory: true } } } } } });
+    if (!sale) throw new HttpError(404, "Sale not found");
+    if (req.user.role === "CASHIER" && sale.cashierId !== req.user.id) throw new HttpError(403, "You can only return items from your own sale");
+    if (!["COMPLETED", "PARTIALLY_RETURNED"].includes(sale.status)) throw new HttpError(409, "Only a fully released sale can be returned");
+    const saleItemsById = new Map(sale.items.map((item) => [item.id, item]));
+    let returnValueCents = 0n;
+    for (const item of items) {
+      const saleItem = saleItemsById.get(item.saleItemId);
+      if (!saleItem) throw new HttpError(400, "A return item does not belong to this sale");
+      const returnable = saleItem.releasedQuantity - saleItem.returnedQuantity;
+      if (item.quantity > returnable) throw new HttpError(409, `Only ${returnable} unit(s) of ${saleItem.product.name} can still be returned`);
+      if (item.locationId) {
+        const location = await transaction.inventoryLocation.findFirst({ where: { id: item.locationId, isActive: true } });
+        if (!location) throw new HttpError(400, "A selected return location is unavailable");
+      }
+      returnValueCents += moneyToCents(saleItem.unitPrice.toFixed(2)) * BigInt(item.quantity);
+    }
+    const currentCreditCents = moneyToCents(sale.creditBalance.toFixed(2));
+    const creditAdjustmentCents = currentCreditCents < returnValueCents ? currentCreditCents : returnValueCents;
+    const completedPaymentCents = sale.payments.filter((payment) => payment.status === "COMPLETED").reduce((total, payment) => total + moneyToCents(payment.amount.toFixed(2)), 0n);
+    const previousRefundCents = sale.payments.filter((payment) => payment.status === "REFUNDED").reduce((total, payment) => total + moneyToCents(payment.amount.toFixed(2)), 0n);
+    const remainingPaidCents = completedPaymentCents > previousRefundCents ? completedPaymentCents - previousRefundCents : 0n;
+    const returnRefundableCents = returnValueCents - creditAdjustmentCents;
+    const maximumCashRefundCents = remainingPaidCents < returnRefundableCents ? remainingPaidCents : returnRefundableCents;
+    if (refundCents > maximumCashRefundCents) throw new HttpError(400, `Refund cannot exceed ${centsToMoney(maximumCashRefundCents)} after credit adjustment`);
+
+    const createdReturn = await transaction.saleReturn.create({ data: { returnNumber: makeReturnNumber(), saleId, processedById: req.user.id, reason, returnValue: centsToMoney(returnValueCents), refundAmount: centsToMoney(refundCents), refundMethod: refundCents > 0n ? refundMethod : null } });
+    for (const item of items) {
+      const saleItem = saleItemsById.get(item.saleItemId);
+      await transaction.saleReturnItem.create({ data: { returnId: createdReturn.id, saleItemId: item.saleItemId, quantity: item.quantity, restocked: item.restocked, locationId: item.restocked ? item.locationId : null } });
+      await transaction.saleItem.update({ where: { id: item.saleItemId }, data: { returnedQuantity: { increment: item.quantity } } });
+      if (item.restocked) {
+        const inventory = await transaction.inventory.update({ where: { productId: saleItem.productId }, data: { quantity: { increment: item.quantity } } });
+        if (item.locationId) await transaction.inventoryLocationBalance.upsert({ where: { locationId_productId: { locationId: item.locationId, productId: saleItem.productId } }, create: { locationId: item.locationId, productId: saleItem.productId, quantity: item.quantity }, update: { quantity: { increment: item.quantity } } });
+        await transaction.inventoryMovement.create({ data: { productId: saleItem.productId, movementType: "RETURN_IN", quantityChange: item.quantity, balanceAfter: inventory.quantity, referenceType: "SALE_RETURN", referenceId: createdReturn.id, createdById: req.user.id, notes: reason } });
+      }
+    }
+    if (refundCents > 0n) await transaction.payment.create({ data: { saleId, paymentMethod: refundMethod, status: "REFUNDED", amount: centsToMoney(refundCents), recordedById: req.user.id } });
+    const allReturned = sale.items.every((saleItem) => saleItem.returnedQuantity + (items.find((item) => item.saleItemId === saleItem.id)?.quantity || 0) === saleItem.releasedQuantity);
+    await transaction.sale.update({ where: { id: saleId }, data: { status: allReturned ? "RETURNED" : "PARTIALLY_RETURNED", creditBalance: centsToMoney(currentCreditCents - creditAdjustmentCents) } });
+    await transaction.auditLog.create({ data: { userId: req.user.id, action: "RETURN_SALE", entityType: "SALE_RETURN", entityId: createdReturn.id, details: { saleId, returnNumber: createdReturn.returnNumber, returnValue: centsToMoney(returnValueCents), refundAmount: centsToMoney(refundCents), creditAdjustment: centsToMoney(creditAdjustmentCents), items } } });
+    return transaction.sale.findUnique({ where: { id: saleId }, include: saleInclude });
+  });
+  return res.status(201).json({ success: true, message: "Sale return recorded, stock restored where selected, and payment status recalculated", data: { sale: serializeSale(returnedSale) } });
+}
+
 module.exports = {
   createSale,
   updateSale,
@@ -981,6 +1085,7 @@ module.exports = {
   listSales,
   getSale,
   cancelSale,
+  returnSale,
   validateSaleRequest,
   sumQuantityByProduct,
 };

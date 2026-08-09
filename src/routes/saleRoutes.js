@@ -6,6 +6,7 @@ const {
   listSales,
   getSale,
   cancelSale,
+  returnSale,
 } = require("../controllers/saleController");
 const { authenticate, authorizeRoles } = require("../middleware/auth");
 
@@ -21,6 +22,7 @@ router.post(
   authorizeRoles("ADMIN", "CASHIER"),
   cancelSale
 );
+router.post("/:id/returns", authorizeRoles("ADMIN", "CASHIER"), returnSale);
 router.get("/:id", authorizeRoles("ADMIN", "CASHIER"), getSale);
 
 module.exports = router;

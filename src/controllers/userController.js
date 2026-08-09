@@ -228,10 +228,64 @@ async function updateUserStatus(req, res) {
   });
 }
 
+async function resetUserPassword(req, res) {
+  const userId = Number(req.params.id);
+  const administratorPassword = String(req.body.administratorPassword || "");
+  const temporaryPassword = String(req.body.temporaryPassword || "");
+
+  if (!Number.isInteger(userId) || userId <= 0) {
+    throw new HttpError(400, "A valid user ID is required");
+  }
+
+  const [administrator, target] = await Promise.all([
+    prisma.user.findUnique({ where: { id: req.user.id } }),
+    prisma.user.findUnique({ where: { id: userId } }),
+  ]);
+  if (!administrator || !(await bcrypt.compare(administratorPassword, administrator.passwordHash))) {
+    throw new HttpError(401, "Your administrator password is incorrect");
+  }
+  if (!target) throw new HttpError(404, "User not found");
+
+  const passwordError = validatePassword(temporaryPassword, target.username);
+  if (passwordError) throw new HttpError(400, passwordError);
+  if (await bcrypt.compare(temporaryPassword, target.passwordHash)) {
+    throw new HttpError(400, "The temporary password must be different from the current password");
+  }
+
+  const passwordHash = await bcrypt.hash(temporaryPassword, 12);
+  await runSerializableTransaction(async (transaction) => {
+    await transaction.user.update({
+      where: { id: userId },
+      data: {
+        passwordHash,
+        passwordChangedAt: new Date(),
+        tokenVersion: { increment: 1 },
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+      },
+    });
+    await transaction.auditLog.create({
+      data: {
+        userId: req.user.id,
+        action: "RESET_USER_PASSWORD",
+        entityType: "USER",
+        entityId: userId,
+        details: { forcedSessionLogout: true },
+      },
+    });
+  });
+
+  return res.json({
+    success: true,
+    message: "Password reset. The user has been signed out on every device.",
+  });
+}
+
 module.exports = {
   createUser,
   listUsers,
   updateUserStatus,
+  resetUserPassword,
   validateNewUser,
   validatePassword,
 };
