@@ -26,6 +26,7 @@ const userRoutes = require("./routes/userRoutes");
 const workspaceRoutes = require("./routes/workspaceRoutes");
 const whatsappRoutes = require("./routes/whatsappRoutes");
 const tenantRoutes = require("./routes/tenantRoutes");
+const ownerDisableRoutes = require("./routes/ownerDisableRoutes");
 const telemetryRoutes = require("./routes/telemetryRoutes");
 const { authenticate, authorizeRoles } = require("./middleware/auth");
 const { instanceIdentity, publicInstanceIdentity } = require("./utils/instanceIdentity");
@@ -152,6 +153,7 @@ app.use("/api/users", userRoutes);
 app.use("/api/workspace", workspaceRoutes);
 app.use("/api/whatsapp", whatsappRoutes);
 app.use("/api/telemetry", telemetryRoutes);
+app.use("/api/internal/owner-disable", ownerDisableRoutes);
 app.use("/api/tenants", tenantRoutes);
 app.use(
   "/api/test",
