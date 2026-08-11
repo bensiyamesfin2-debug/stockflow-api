@@ -250,6 +250,7 @@ model Payment {
   paymentMethod        PaymentMethod @map("payment_method")
   status               PaymentStatus @default(COMPLETED)
   bankName             String?       @map("bank_name") @db.VarChar(150)
+  recipientAccount     String?       @map("recipient_account") @db.VarChar(150)
   transactionReference String?       @map("transaction_reference") @db.VarChar(150)
   amount               Decimal       @db.Decimal(12, 2)
   recordedById         Int           @map("recorded_by_id")

@@ -195,6 +195,7 @@ function validateSaleRequest(body) {
         .toUpperCase();
       const amountCents = moneyToCents(rawPayment?.amount);
       const bankName = String(rawPayment?.bankName || "").trim() || null;
+      const recipientAccount = String(rawPayment?.recipientAccount || "").trim() || null;
       const transactionReference =
         String(rawPayment?.transactionReference || "").trim() || null;
 
@@ -210,6 +211,10 @@ function validateSaleRequest(body) {
         errors.push(`Payment ${index + 1} bank name cannot exceed 150 characters`);
       }
 
+      if (recipientAccount && recipientAccount.length > 150) {
+        errors.push(`Payment ${index + 1} recipient account cannot exceed 150 characters`);
+      }
+
       if (transactionReference && transactionReference.length > 150) {
         errors.push(
           `Payment ${index + 1} transaction reference cannot exceed 150 characters`
@@ -218,6 +223,10 @@ function validateSaleRequest(body) {
 
       if (paymentMethod === "BANK_TRANSFER" && !bankName) {
         errors.push(`Payment ${index + 1} requires a bank name`);
+      }
+
+      if (["BANK_TRANSFER", "MOBILE_MONEY"].includes(paymentMethod) && !recipientAccount) {
+        errors.push(`Payment ${index + 1} requires a recipient account`);
       }
 
       if (
@@ -231,6 +240,7 @@ function validateSaleRequest(body) {
         paymentMethod,
         amountCents,
         bankName: paymentMethod === "CASH" ? null : bankName,
+        recipientAccount: paymentMethod === "CASH" ? null : recipientAccount,
         transactionReference:
           paymentMethod === "CASH" ? null : transactionReference,
       });
@@ -467,6 +477,7 @@ async function createSale(req, res) {
           saleId: createdSale.id,
           paymentMethod: payment.paymentMethod,
           bankName: payment.bankName,
+          recipientAccount: payment.recipientAccount,
           transactionReference: payment.transactionReference,
           amount: centsToMoney(payment.amountCents),
           recordedById: req.user.id,
@@ -738,6 +749,7 @@ async function updateSale(req, res) {
           saleId,
           paymentMethod: payment.paymentMethod,
           bankName: payment.bankName,
+          recipientAccount: payment.recipientAccount,
           transactionReference: payment.transactionReference,
           amount: centsToMoney(payment.amountCents),
           recordedById: req.user.id,
@@ -812,13 +824,16 @@ async function recordCreditPayment(req, res) {
   const paymentMethod = String(req.body.paymentMethod || "").trim().toUpperCase();
   const amountCents = moneyToCents(req.body.amount);
   const bankName = String(req.body.bankName || "").trim() || null;
+  const recipientAccount = String(req.body.recipientAccount || "").trim() || null;
   const transactionReference = String(req.body.transactionReference || "").trim() || null;
   if (!Number.isInteger(saleId) || saleId <= 0 || !PAYMENT_METHODS.has(paymentMethod) || amountCents === null || amountCents <= 0n) {
     return res.status(400).json({ success: false, message: "Enter a valid payment method and amount" });
   }
   if (bankName && bankName.length > 150) return res.status(400).json({ success: false, message: "Bank name cannot exceed 150 characters" });
+  if (recipientAccount && recipientAccount.length > 150) return res.status(400).json({ success: false, message: "Recipient account cannot exceed 150 characters" });
   if (transactionReference && transactionReference.length > 150) return res.status(400).json({ success: false, message: "Transaction reference cannot exceed 150 characters" });
   if (paymentMethod === "BANK_TRANSFER" && !bankName) return res.status(400).json({ success: false, message: "Bank transfer requires a bank name" });
+  if (["BANK_TRANSFER", "MOBILE_MONEY"].includes(paymentMethod) && !recipientAccount) return res.status(400).json({ success: false, message: "This payment method requires a recipient account" });
   if (["BANK_TRANSFER", "MOBILE_MONEY", "CARD"].includes(paymentMethod) && !transactionReference) return res.status(400).json({ success: false, message: "This payment method requires a transaction reference" });
 
   const sale = await runSerializableTransaction(async (transaction) => {
@@ -834,13 +849,14 @@ async function recordCreditPayment(req, res) {
         saleId,
         paymentMethod,
         bankName: paymentMethod === "CASH" ? null : bankName,
+        recipientAccount: paymentMethod === "CASH" ? null : recipientAccount,
         transactionReference: paymentMethod === "CASH" ? null : transactionReference,
         amount: centsToMoney(amountCents),
         recordedById: req.user.id,
       },
     });
     const updated = await transaction.sale.update({ where: { id: saleId }, data: { creditBalance: centsToMoney(remainingCents - amountCents) }, include: saleInclude });
-    await transaction.auditLog.create({ data: { userId: req.user.id, action: "COLLECT_CREDIT_PAYMENT", entityType: "SALE", entityId: saleId, details: { saleNumber: existing.saleNumber, amount: centsToMoney(amountCents), paymentMethod, remainingBalance: centsToMoney(remainingCents - amountCents) } } });
+    await transaction.auditLog.create({ data: { userId: req.user.id, action: "COLLECT_CREDIT_PAYMENT", entityType: "SALE", entityId: saleId, details: { saleNumber: existing.saleNumber, amount: centsToMoney(amountCents), paymentMethod, bankName, recipientAccount, remainingBalance: centsToMoney(remainingCents - amountCents) } } });
     return updated;
   });
   return res.status(201).json({ success: true, message: "Credit payment recorded", data: { sale: serializeSale(sale) } });

@@ -279,3 +279,35 @@ test("warehouse operations persist locations, batches, delivery proof, and credi
   assert.deepEqual(creditSale.errors, []);
   assert.equal(creditSale.data.allowCredit, true);
 });
+
+test("non-cash payments retain their recipient account for dashboards and exports", () => {
+  const missingAccount = validateSaleRequest({
+    items: [{ productId: 12, quantity: 1 }],
+    payments: [{
+      paymentMethod: "BANK_TRANSFER",
+      amount: "2500.00",
+      bankName: "Commercial Bank",
+      transactionReference: "TX-100",
+    }],
+  });
+  assert.match(missingAccount.errors.join(" "), /recipient account/i);
+
+  const validPayment = validateSaleRequest({
+    items: [{ productId: 12, quantity: 1 }],
+    payments: [{
+      paymentMethod: "BANK_TRANSFER",
+      amount: "2500.00",
+      bankName: "Commercial Bank",
+      recipientAccount: "1000123456789",
+      transactionReference: "TX-100",
+    }],
+  });
+  assert.deepEqual(validPayment.errors, []);
+  assert.equal(validPayment.data.payments[0].recipientAccount, "1000123456789");
+
+  const schema = fs.readFileSync(path.join(__dirname, "..", "prisma", "schema.prisma"), "utf8");
+  const exportController = fs.readFileSync(path.join(__dirname, "..", "src", "controllers", "exportController.js"), "utf8");
+  assert.match(schema, /recipientAccount\s+String\?/);
+  assert.match(exportController, /title: "Recipient Account"/);
+  assert.match(exportController, /title: "Payment Destination"/);
+});

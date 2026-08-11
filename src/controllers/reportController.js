@@ -23,6 +23,31 @@ function sumMoney(values) {
   );
 }
 
+function groupRecipientAccounts(payments) {
+  return [...payments
+    .filter((payment) => payment.recipientAccount)
+    .reduce((groups, payment) => {
+      const key = `${payment.bankName || "Other"}\u0000${payment.recipientAccount}`;
+      const current = groups.get(key) || {
+        bankName: payment.bankName || "Other",
+        recipientAccount: payment.recipientAccount,
+        count: 0,
+        amounts: [],
+      };
+      current.count += 1;
+      current.amounts.push(payment.amount);
+      groups.set(key, current);
+      return groups;
+    }, new Map()).values()]
+    .map((values) => ({
+      bankName: values.bankName,
+      recipientAccount: values.recipientAccount,
+      count: values.count,
+      amount: sumMoney(values.amounts),
+    }))
+    .sort((left, right) => Number(right.amount) - Number(left.amount));
+}
+
 function parseDateRange(query) {
   const defaultFrom = new Date();
   defaultFrom.setDate(defaultFrom.getDate() - 29);
@@ -141,7 +166,7 @@ async function adminDashboard() {
         status: "COMPLETED",
         sale: { status: { not: "CANCELLED" } },
       },
-      select: { amount: true, paymentMethod: true, bankName: true },
+      select: { amount: true, paymentMethod: true, bankName: true, recipientAccount: true },
     }),
   ]);
 
@@ -175,6 +200,7 @@ async function adminDashboard() {
     count: values.count,
     amount: sumMoney(values.amounts),
   }));
+  const recipientAccounts = groupRecipientAccounts(payments);
 
   return {
     role: "ADMIN",
@@ -187,6 +213,7 @@ async function adminDashboard() {
     },
     trend,
     paymentMethods,
+    recipientAccounts,
     lowStock: lowStock.slice(0, 8),
     recentSales,
   };
@@ -204,6 +231,9 @@ async function cashierDashboard(userId) {
     orderBy: { createdAt: "desc" },
   });
   const validSales = sales.filter((sale) => sale.status !== "CANCELLED");
+  const recipientAccounts = groupRecipientAccounts(validSales.flatMap((sale) =>
+    sale.payments.filter((payment) => payment.status === "COMPLETED")
+  ));
 
   return {
     role: "CASHIER",
@@ -215,6 +245,7 @@ async function cashierDashboard(userId) {
       ).length,
       completedToday: validSales.filter((sale) => sale.status === "COMPLETED").length,
     },
+    recipientAccounts,
     recentSales: sales,
   };
 }
@@ -304,7 +335,7 @@ async function getLiveSalesSummary(req, res) {
     },
   }), findAllById(prisma.payment, {
     where: { createdAt: { gte: from, lte: to }, status: { in: ["COMPLETED", "REFUNDED"] }, sale: { status: { not: "CANCELLED" }, ...(req.user.role === "CASHIER" ? { cashierId: req.user.id } : {}) } },
-    select: { id: true, amount: true, paymentMethod: true, status: true },
+    select: { id: true, amount: true, paymentMethod: true, bankName: true, recipientAccount: true, status: true },
   })]);
 
   const paymentMethods = [...payments.reduce((groups, payment) => {
@@ -323,6 +354,7 @@ async function getLiveSalesSummary(req, res) {
 
   const collectedPayments = payments.filter((payment) => payment.status === "COMPLETED");
   const refundedPayments = payments.filter((payment) => payment.status === "REFUNDED");
+  const recipientAccounts = groupRecipientAccounts(collectedPayments);
 
   return res.json({
     success: true,
@@ -342,6 +374,7 @@ async function getLiveSalesSummary(req, res) {
         completed: sales.filter((sale) => sale.status === "COMPLETED").length,
       },
       paymentMethods,
+      recipientAccounts,
     },
   });
 }
@@ -573,6 +606,7 @@ async function getPaymentReport(req, res) {
     count: values.count,
     amount: sumMoney(values.amounts),
   }));
+  const byAccount = groupRecipientAccounts(completed);
 
   return res.json({
     success: true,
@@ -585,6 +619,7 @@ async function getPaymentReport(req, res) {
       totalRefunded: sumMoney(refunded.map((payment) => payment.amount)),
       byMethod,
       byBank,
+      byAccount,
       payments,
     },
   });

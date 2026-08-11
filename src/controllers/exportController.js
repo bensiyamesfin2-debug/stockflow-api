@@ -60,7 +60,16 @@ async function exportSales(req, res) {
       payments: true,
     },
   });
-  const rows = sales.flatMap((sale) => sale.items.map((item) => ({
+  const rows = sales.flatMap((sale) => {
+    const completedPayments = sale.payments.filter((payment) => payment.status === "COMPLETED");
+    const bankNames = [...new Set(completedPayments.map((payment) => payment.bankName).filter(Boolean))].join(" + ");
+    const recipientAccounts = [...new Set(completedPayments.map((payment) => payment.recipientAccount).filter(Boolean))].join(" + ");
+    const transactionReferences = [...new Set(completedPayments.map((payment) => payment.transactionReference).filter(Boolean))].join(" + ");
+    const paymentDestinations = completedPayments
+      .filter((payment) => payment.bankName || payment.recipientAccount)
+      .map((payment) => `${payment.bankName || payment.paymentMethod}${payment.recipientAccount ? ` → ${payment.recipientAccount}` : ""}`)
+      .join(" + ");
+    return sale.items.map((item) => ({
     saleNumber: sale.saleNumber,
     date: sale.createdAt.toISOString(),
     status: sale.status,
@@ -78,8 +87,13 @@ async function exportSales(req, res) {
     discountCode: sale.discount?.code || "",
     discountAmount: sale.discountAmount.toFixed(2),
     saleTotal: sale.totalAmount.toFixed(2),
-    paymentMethods: [...new Set(sale.payments.filter((payment) => payment.status === "COMPLETED").map((payment) => payment.paymentMethod))].join(" + "),
-  })));
+    paymentMethods: [...new Set(completedPayments.map((payment) => payment.paymentMethod))].join(" + "),
+    bankNames,
+    recipientAccounts,
+    transactionReferences,
+    paymentDestinations,
+  }));
+  });
   return sendCsv(res, `stockflow-sales-${new Date().toISOString().slice(0, 10)}.csv`, [
     { id: "saleNumber", title: "Sale Number" },
     { id: "date", title: "Date" },
@@ -99,6 +113,10 @@ async function exportSales(req, res) {
     { id: "discountAmount", title: "Sale Discount" },
     { id: "saleTotal", title: "Sale Total" },
     { id: "paymentMethods", title: "Payment Methods" },
+    { id: "bankNames", title: "Bank / Provider" },
+    { id: "recipientAccounts", title: "Recipient Account" },
+    { id: "transactionReferences", title: "Transaction Reference" },
+    { id: "paymentDestinations", title: "Payment Destination" },
   ], rows);
 }
 
