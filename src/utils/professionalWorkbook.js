@@ -77,6 +77,7 @@ function styleDataSheet(worksheet, columns, rowCount, moneyFormat, companyName) 
     if (column.format === "money") target.numFmt = moneyFormat;
     if (column.format === "date") target.numFmt = DATE_FORMAT;
     if (column.format === "integer") target.numFmt = "#,##0";
+    if (column.format === "text") target.numFmt = "@";
   });
   worksheet.pageSetup = { orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0, margins: { left: .25, right: .25, top: .5, bottom: .5, header: .2, footer: .2 } };
   worksheet.headerFooter.oddFooter = `&L${footerText(companyName)} · StockFlow&CPage &P of &N&RConfidential`;
@@ -104,6 +105,36 @@ function accountSummary(sales) {
     });
   });
   return [...accounts.values()].sort((left, right) => right.amount - left.amount);
+}
+
+function soldItemSummary(sales) {
+  const items = new Map();
+  sales.filter((sale) => sale.status !== "CANCELLED").forEach((sale) => {
+    (sale.items || []).forEach((item) => {
+      const itemMeasurement = measurement({
+        length: item.customLength || item.product.length,
+        width: item.customWidth || item.product.width,
+        thickness: item.customThickness || item.product.thickness,
+      });
+      const key = `${item.product.id}\u0000${itemMeasurement}`;
+      const current = items.get(key) || {
+        itemType: item.product.category?.name || "Uncategorised",
+        product: item.product.name,
+        sku: item.product.sku,
+        measurement: itemMeasurement,
+        sales: 0,
+        units: 0,
+        released: 0,
+        revenue: 0,
+      };
+      current.sales += 1;
+      current.units += number(item.quantity);
+      current.released += number(item.releasedQuantity);
+      current.revenue += number(item.unitPrice) * number(item.quantity);
+      items.set(key, current);
+    });
+  });
+  return [...items.values()].map((item) => ({ ...item, averageUnitPrice: item.units ? item.revenue / item.units : 0 })).sort((left, right) => right.revenue - left.revenue);
 }
 
 function addSummarySheet(workbook, { sales, inventory, from, to, generatedAt, companyName, currency, moneyFormat }) {
@@ -191,6 +222,7 @@ function addSummarySheet(workbook, { sales, inventory, from, to, generatedAt, co
         worksheet.getCell(row, column).border = { bottom: { style: "hair", color: { argb: MID } } };
       });
       worksheet.getCell(row, 7).numFmt = moneyFormat;
+      worksheet.getCell(row, 3).numFmt = "@";
     });
   }
   worksheet.views = [{ state: "frozen", ySplit: 2 }];
@@ -250,8 +282,9 @@ function buildProfessionalWorkbook({ sales, inventory, products, from, to, gener
     { header: "Sale Number", key: "saleNumber", width: 25 },
     { header: "Date", key: "date", width: 20, format: "date" },
     { header: "Customer", key: "customer", width: 24 },
-    { header: "Internal SKU", key: "sku", width: 22 },
-    { header: "Product", key: "product", width: 22 },
+    { header: "Internal SKU", key: "sku", width: 22, format: "text" },
+    { header: "Product", key: "product", width: 22, format: "text" },
+    { header: "Item Type", key: "itemType", width: 20 },
     { header: "Measurement", key: "measurement", width: 18 },
     { header: "Quantity", key: "quantity", width: 12, format: "integer" },
     { header: "Released", key: "released", width: 12, format: "integer" },
@@ -265,6 +298,7 @@ function buildProfessionalWorkbook({ sales, inventory, products, from, to, gener
     customer: sale.customer?.name || sale.customerName || "Walk-in customer",
     sku: item.product.sku,
     product: item.product.name,
+    itemType: item.product.category?.name || "Uncategorised",
     measurement: measurement({ length: item.customLength || item.product.length, width: item.customWidth || item.product.width, thickness: item.customThickness || item.product.thickness }),
     quantity: item.quantity,
     released: item.releasedQuantity,
@@ -274,6 +308,18 @@ function buildProfessionalWorkbook({ sales, inventory, products, from, to, gener
     discountCode: sale.discount?.code || null,
   }))), moneyFormat, normalizedCompanyName);
 
+  addDataSheet(workbook, "Sold Items Summary", [
+    { header: "Item Type", key: "itemType", width: 22 },
+    { header: "Product", key: "product", width: 22, format: "text" },
+    { header: "Internal SKU", key: "sku", width: 22, format: "text" },
+    { header: "Measurement", key: "measurement", width: 18 },
+    { header: "Sales", key: "sales", width: 12, format: "integer" },
+    { header: "Units Sold", key: "units", width: 14, format: "integer" },
+    { header: "Units Released", key: "released", width: 16, format: "integer" },
+    { header: "Revenue", key: "revenue", width: 16, format: "money" },
+    { header: "Average Unit Price", key: "averageUnitPrice", width: 18, format: "money" },
+  ], soldItemSummary(sales), moneyFormat, normalizedCompanyName);
+
   addDataSheet(workbook, "Payments", [
     { header: "Payment Date", key: "date", width: 20, format: "date" },
     { header: "Sale Number", key: "saleNumber", width: 25 },
@@ -281,7 +327,7 @@ function buildProfessionalWorkbook({ sales, inventory, products, from, to, gener
     { header: "Method", key: "method", width: 18 },
     { header: "Status", key: "status", width: 16 },
     { header: "Bank / Provider", key: "bank", width: 24 },
-    { header: "Recipient Account", key: "account", width: 24 },
+    { header: "Recipient Account", key: "account", width: 24, format: "text" },
     { header: "Transaction Reference", key: "reference", width: 24 },
     { header: "Amount", key: "amount", width: 16, format: "money" },
     { header: "Recorded By", key: "recordedBy", width: 22 },
@@ -355,4 +401,4 @@ function buildProfessionalWorkbook({ sales, inventory, products, from, to, gener
   return workbook;
 }
 
-module.exports = { buildProfessionalWorkbook, paymentStatus, accountSummary, currencyFormat };
+module.exports = { buildProfessionalWorkbook, paymentStatus, accountSummary, soldItemSummary, currencyFormat };

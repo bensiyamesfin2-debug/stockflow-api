@@ -26,8 +26,10 @@ const userRoutes = require("./routes/userRoutes");
 const workspaceRoutes = require("./routes/workspaceRoutes");
 const whatsappRoutes = require("./routes/whatsappRoutes");
 const tenantRoutes = require("./routes/tenantRoutes");
+const telemetryRoutes = require("./routes/telemetryRoutes");
 const { authenticate, authorizeRoles } = require("./middleware/auth");
 const { instanceIdentity, publicInstanceIdentity } = require("./utils/instanceIdentity");
+const { reportInstanceError } = require("./utils/telemetryReporter");
 
 const app = express();
 
@@ -149,6 +151,7 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/workspace", workspaceRoutes);
 app.use("/api/whatsapp", whatsappRoutes);
+app.use("/api/telemetry", telemetryRoutes);
 app.use("/api/tenants", tenantRoutes);
 app.use(
   "/api/test",
@@ -178,6 +181,7 @@ app.use((error, req, res, next) => {
   }
 
   console.error(JSON.stringify({ level: "error", event: "unhandled_request_error", requestId: req.requestId, message: error.message, stack: error.stack }));
+  reportInstanceError(error, req, 500);
 
   return res.status(500).json({
     success: false,

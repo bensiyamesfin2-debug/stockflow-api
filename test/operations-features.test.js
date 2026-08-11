@@ -205,7 +205,11 @@ test("professional workbook separates ledgers and preserves payment destinations
   const inventory = [{ quantity: 12, reservedQuantity: 0, reorderLevel: 3, updatedAt: new Date("2026-08-12T09:00:00Z"), product }];
   const workbook = buildProfessionalWorkbook({ sales, inventory, products: [product], generatedAt: new Date("2026-08-12T10:00:00Z") });
 
-  assert.deepEqual(workbook.worksheets.map((sheet) => sheet.name), ["Executive Summary", "Sales Ledger", "Sale Items", "Payments", "Inventory", "Products"]);
+  assert.deepEqual(workbook.worksheets.map((sheet) => sheet.name), ["Executive Summary", "Sales Ledger", "Sale Items", "Sold Items Summary", "Payments", "Inventory", "Products"]);
+  assert.equal(workbook.getWorksheet("Sale Items").getCell("F2").value, "Granite");
+  assert.equal(workbook.getWorksheet("Sold Items Summary").getCell("A2").value, "Granite");
+  assert.equal(workbook.getWorksheet("Sold Items Summary").getCell("F2").value, 2);
+  assert.equal(workbook.getWorksheet("Sold Items Summary").getCell("H2").value, 1800);
   assert.equal(workbook.getWorksheet("Payments").getCell("F2").value, "Commercial Bank");
   assert.equal(workbook.getWorksheet("Payments").getCell("G2").value, "1000123456789");
   assert.match(workbook.getWorksheet("Payments").getCell("I2").numFmt, /ETB/);

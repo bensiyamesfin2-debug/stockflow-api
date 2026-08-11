@@ -1,4 +1,5 @@
 const prisma = require("../config/prisma");
+const crypto = require("crypto");
 const { instanceIdentity, SLUG_PATTERN } = require("../utils/instanceIdentity");
 
 const PLANS = new Set(["STARTER", "GROWTH", "ENTERPRISE"]);
@@ -17,8 +18,20 @@ function optional(value, maximum) {
   return normalized || null;
 }
 
-function provisioningConfig(tenant) {
-  return {
+function hashToken(token) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function controlPlaneUrl(req) {
+  const origin = String(req.get("origin") || "").replace(/\/$/, "");
+  if (/^https:\/\//i.test(origin)) return origin;
+  const host = req.get("x-forwarded-host") || req.get("host");
+  const protocol = req.get("x-forwarded-proto") || req.protocol;
+  return host ? `${protocol}://${host}` : "https://your-control-plane.example";
+}
+
+function provisioningConfig(tenant, monitoringToken, publicControlPlaneUrl) {
+  const config = {
     INSTANCE_TENANT_ID: tenant.id,
     INSTANCE_COMPANY_CODE: tenant.slug,
     INSTANCE_COMPANY_NAME: tenant.companyName,
@@ -29,10 +42,16 @@ function provisioningConfig(tenant) {
     INSTANCE_PLAN: tenant.plan,
     INSTANCE_CONTROL_PLANE: "false",
   };
+  if (monitoringToken) {
+    config.CONTROL_PLANE_URL = publicControlPlaneUrl;
+    config.INSTANCE_MONITORING_TOKEN = monitoringToken;
+  }
+  return config;
 }
 
 function serializeTenant(tenant) {
-  return { ...tenant, provisioningConfig: provisioningConfig(tenant) };
+  const { monitoringTokenHash, ...safeTenant } = tenant;
+  return { ...safeTenant, monitoringConfigured: Boolean(monitoringTokenHash), provisioningConfig: provisioningConfig(tenant) };
 }
 
 async function ensureCurrentTenant() {
@@ -83,6 +102,7 @@ async function createTenant(req, res) {
   const region = clean(req.body.region || "africa-east1", 48).toLowerCase();
   const plan = clean(req.body.plan || "GROWTH", 24).toUpperCase();
   const notes = optional(req.body.notes, 4000);
+  const monitoringToken = crypto.randomBytes(32).toString("base64url");
 
   if (!companyName || !SLUG_PATTERN.test(slug) || !COMPANY_CODE_PATTERN.test(companyCode)) {
     return res.status(400).json({ success: false, message: "Enter a company name, a URL-safe slug, and a valid company code" });
@@ -104,6 +124,7 @@ async function createTenant(req, res) {
           timezone,
           region,
           notes,
+          monitoringTokenHash: hashToken(monitoringToken),
           createdById: req.user.id,
         },
         include: { createdBy: { select: { id: true, fullName: true, username: true } } },
@@ -121,7 +142,7 @@ async function createTenant(req, res) {
     return res.status(201).json({
       success: true,
       message: `${companyName} is registered and ready for its isolated StockFlow deployment`,
-      data: { tenant: serializeTenant(tenant) },
+      data: { tenant: { ...serializeTenant(tenant), provisioningConfig: provisioningConfig(tenant, monitoringToken, controlPlaneUrl(req)) } },
     });
   } catch (error) {
     if (error.code === "P2002") {
@@ -176,4 +197,61 @@ async function updateTenant(req, res) {
   }
 }
 
-module.exports = { listTenants, createTenant, updateTenant, provisioningConfig, serializeTenant };
+function operationalHealth(tenant, now = Date.now()) {
+  if (["SUSPENDED", "ARCHIVED"].includes(tenant.status)) return "PAUSED";
+  if (!tenant.lastHeartbeatAt) return "NOT_CONNECTED";
+  if (now - new Date(tenant.lastHeartbeatAt).getTime() > 15 * 60_000) return "OFFLINE";
+  return tenant.lastHealthStatus || "UNKNOWN";
+}
+
+async function operationsOverview(req, res) {
+  await ensureCurrentTenant();
+  const current = await prisma.saasTenant.findUnique({ where: { slug: instanceIdentity.companyCode } });
+  if (current) {
+    await prisma.saasTenant.update({
+      where: { id: current.id },
+      data: {
+        lastHeartbeatAt: new Date(), lastHealthStatus: "HEALTHY", lastDatabaseOk: true,
+        lastVersion: String(process.env.INSTANCE_VERSION || process.env.RAILWAY_GIT_COMMIT_SHA || "current").slice(0, 80),
+        lastUptimeSeconds: Math.round(process.uptime()), lastMemoryMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+      },
+    });
+  }
+  const [tenants, incidents] = await Promise.all([
+    prisma.saasTenant.findMany({ orderBy: { companyName: "asc" } }),
+    prisma.tenantErrorAggregate.findMany({ where: { resolvedAt: null, occurrenceCount: { gte: 3 } }, include: { tenant: { select: { id: true, companyName: true, slug: true } } }, orderBy: { lastSeenAt: "desc" }, take: 100 }),
+  ]);
+  const healthTenants = tenants.map((tenant) => ({
+    id: tenant.id, companyName: tenant.companyName, slug: tenant.slug, status: tenant.status, plan: tenant.plan,
+    deploymentUrl: tenant.deploymentUrl, health: operationalHealth(tenant), lastHeartbeatAt: tenant.lastHeartbeatAt,
+    databaseOk: tenant.lastDatabaseOk, version: tenant.lastVersion, uptimeSeconds: tenant.lastUptimeSeconds,
+    memoryMb: tenant.lastMemoryMb, lastErrorAt: tenant.lastErrorAt,
+  }));
+  const healthy = healthTenants.filter((tenant) => tenant.health === "HEALTHY").length;
+  const attention = healthTenants.filter((tenant) => !["HEALTHY", "PAUSED"].includes(tenant.health)).length;
+  return res.json({ success: true, data: { checkedAt: new Date().toISOString(), summary: { total: tenants.length, healthy, attention, repeatedIncidents: incidents.length }, tenants: healthTenants, incidents } });
+}
+
+async function rotateMonitoringToken(req, res) {
+  const id = String(req.params.id || "");
+  const tenant = await prisma.saasTenant.findUnique({ where: { id } });
+  if (!tenant) return res.status(404).json({ success: false, message: "Customer workspace not found" });
+  const monitoringToken = crypto.randomBytes(32).toString("base64url");
+  await prisma.saasTenant.update({ where: { id }, data: { monitoringTokenHash: hashToken(monitoringToken), lastHeartbeatAt: null, lastHealthStatus: "UNKNOWN" } });
+  await prisma.auditLog.create({ data: { userId: req.user.id, action: "ROTATE_TENANT_MONITORING_TOKEN", entityType: "SAAS_TENANT", details: { tenantId: id } } });
+  return res.json({ success: true, message: "Monitoring token rotated. Update the customer deployment now.", data: { provisioningConfig: provisioningConfig(tenant, monitoringToken, controlPlaneUrl(req)) } });
+}
+
+async function resolveIncident(req, res) {
+  const tenantId = String(req.params.id || "");
+  const incidentId = Number(req.params.incidentId);
+  const incident = await prisma.tenantErrorAggregate.findFirst({ where: { id: incidentId, tenantId } });
+  if (!incident) return res.status(404).json({ success: false, message: "Incident not found" });
+  await prisma.$transaction([
+    prisma.tenantErrorAggregate.update({ where: { id: incidentId }, data: { resolvedAt: new Date() } }),
+    prisma.auditLog.create({ data: { userId: req.user.id, action: "RESOLVE_TENANT_INCIDENT", entityType: "TENANT_ERROR", details: { tenantId, incidentId } } }),
+  ]);
+  return res.json({ success: true, message: "Incident marked resolved" });
+}
+
+module.exports = { listTenants, createTenant, updateTenant, operationsOverview, rotateMonitoringToken, resolveIncident, provisioningConfig, serializeTenant, operationalHealth };

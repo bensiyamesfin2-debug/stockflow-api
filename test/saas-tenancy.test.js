@@ -44,3 +44,20 @@ test("the SaaS control plane stores metadata only and provisions dedicated datab
   assert.doesNotMatch(controller, /DATABASE_URL/);
   assert.match(routes, /authorizePlatformOwner, authorizeControlPlane/);
 });
+
+test("tenant monitoring stores hashed credentials and metadata-only error aggregates", () => {
+  const migration = source("prisma/migrations/20260812150000_add_tenant_operations_monitoring/migration.sql");
+  const telemetry = source("src/controllers/telemetryController.js");
+  const reporter = source("src/utils/telemetryReporter.js");
+  const routes = source("src/routes/tenantRoutes.js");
+
+  assert.match(migration, /"monitoring_token_hash" VARCHAR\(64\)/);
+  assert.match(migration, /CREATE TABLE "tenant_error_aggregates"/);
+  assert.match(telemetry, /timingSafeEqual/);
+  assert.match(telemetry, /occurrenceCount: \{ increment: 1 \}/);
+  assert.doesNotMatch(telemetry, /req\.body\.(message|stack|requestBody)/);
+  assert.doesNotMatch(reporter, /stack:/);
+  assert.match(routes, /authorizePlatformOwner, authorizeControlPlane/);
+  assert.match(routes, /\/operations/);
+  assert.match(routes, /errors\/:incidentId\/resolve/);
+});

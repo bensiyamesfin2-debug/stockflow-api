@@ -133,28 +133,57 @@ model User {
 }
 
 model SaasTenant {
-  id                String           @id @default(uuid()) @db.Uuid
-  companyName       String           @map("company_name") @db.VarChar(160)
-  companyCode       String           @unique @map("company_code") @db.VarChar(40)
-  slug              String           @unique @db.VarChar(80)
-  status            SaasTenantStatus @default(PROVISIONING)
-  plan              String           @default("GROWTH") @db.VarChar(24)
-  primaryCurrency   String           @default("ETB") @map("primary_currency") @db.VarChar(3)
-  locale            String           @default("en") @db.VarChar(10)
-  timezone          String           @default("Africa/Addis_Ababa") @db.VarChar(64)
-  region            String           @default("africa-east1") @db.VarChar(48)
-  deploymentUrl     String?          @unique @map("deployment_url") @db.VarChar(500)
-  databaseIsolation String           @default("DEDICATED_DATABASE") @map("database_isolation") @db.VarChar(32)
-  notes             String?
-  createdById       Int?             @map("created_by_id")
-  activatedAt       DateTime?        @map("activated_at") @db.Timestamptz(3)
-  createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
-  createdBy         User?            @relation("SaasTenantCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  id                  String                 @id @default(uuid()) @db.Uuid
+  companyName         String                 @map("company_name") @db.VarChar(160)
+  companyCode         String                 @unique @map("company_code") @db.VarChar(40)
+  slug                String                 @unique @db.VarChar(80)
+  status              SaasTenantStatus       @default(PROVISIONING)
+  plan                String                 @default("GROWTH") @db.VarChar(24)
+  primaryCurrency     String                 @default("ETB") @map("primary_currency") @db.VarChar(3)
+  locale              String                 @default("en") @db.VarChar(10)
+  timezone            String                 @default("Africa/Addis_Ababa") @db.VarChar(64)
+  region              String                 @default("africa-east1") @db.VarChar(48)
+  deploymentUrl       String?                @unique @map("deployment_url") @db.VarChar(500)
+  databaseIsolation   String                 @default("DEDICATED_DATABASE") @map("database_isolation") @db.VarChar(32)
+  monitoringTokenHash String?                @map("monitoring_token_hash") @db.VarChar(64)
+  lastHeartbeatAt     DateTime?              @map("last_heartbeat_at") @db.Timestamptz(3)
+  lastHealthStatus    String                 @default("UNKNOWN") @map("last_health_status") @db.VarChar(24)
+  lastDatabaseOk      Boolean?               @map("last_database_ok")
+  lastVersion         String?                @map("last_version") @db.VarChar(80)
+  lastUptimeSeconds   Int?                   @map("last_uptime_seconds")
+  lastMemoryMb        Int?                   @map("last_memory_mb")
+  lastErrorAt         DateTime?              @map("last_error_at") @db.Timestamptz(3)
+  notes               String?
+  createdById         Int?                   @map("created_by_id")
+  activatedAt         DateTime?              @map("activated_at") @db.Timestamptz(3)
+  createdAt           DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime               @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy           User?                  @relation("SaasTenantCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  errorAggregates     TenantErrorAggregate[]
 
   @@index([status, createdAt])
   @@index([createdById])
   @@map("saas_tenants")
+}
+
+model TenantErrorAggregate {
+  id              Int        @id @default(autoincrement())
+  tenantId        String     @map("tenant_id") @db.Uuid
+  fingerprint     String     @db.VarChar(64)
+  errorType       String     @map("error_type") @db.VarChar(120)
+  route           String     @db.VarChar(200)
+  method          String     @db.VarChar(10)
+  statusCode      Int        @map("status_code")
+  occurrenceCount Int        @default(1) @map("occurrence_count")
+  firstSeenAt     DateTime   @default(now()) @map("first_seen_at") @db.Timestamptz(3)
+  lastSeenAt      DateTime   @default(now()) @map("last_seen_at") @db.Timestamptz(3)
+  resolvedAt      DateTime?  @map("resolved_at") @db.Timestamptz(3)
+  tenant          SaasTenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, fingerprint])
+  @@index([resolvedAt, lastSeenAt])
+  @@index([tenantId, occurrenceCount])
+  @@map("tenant_error_aggregates")
 }
 
 model LoginPairing {

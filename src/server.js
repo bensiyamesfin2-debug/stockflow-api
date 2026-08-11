@@ -3,6 +3,7 @@ require("dotenv").config();
 const http = require("http");
 const app = require("./app");
 const prisma = require("./config/prisma");
+const { startTelemetryReporter, stopTelemetryReporter } = require("./utils/telemetryReporter");
 
 const PORT = process.env.PORT || 5000;
 const server = http.createServer(app);
@@ -39,6 +40,7 @@ async function startServer() {
 
     server.listen(PORT, "0.0.0.0", () => {
       console.log(`Server running on port ${PORT}`);
+      startTelemetryReporter(prisma);
     });
   } catch (error) {
     console.error("Unable to start the server:", error);
@@ -48,6 +50,7 @@ async function startServer() {
 
 function shutDown(signal) {
   console.log(`${signal} received. Shutting down...`);
+  stopTelemetryReporter();
 
   server.close(async () => {
     await prisma.$disconnect();
