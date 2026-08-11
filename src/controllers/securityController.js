@@ -1,6 +1,7 @@
 const prisma = require("../config/prisma");
 const { encryptJsonBackup } = require("../utils/backupEncryption");
 const { generateSecret, verifyCode, provisioningUri } = require("../utils/totp");
+const { instanceIdentity } = require("../utils/instanceIdentity");
 
 async function getSecurityStatus(req, res) {
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -234,8 +235,9 @@ async function createEncryptedBackup(req, res) {
   );
   const payload = {
     schemaVersion: 3,
-    instanceCompanyCode: process.env.INSTANCE_COMPANY_CODE || "bensiya-plc",
-    isolationMode: "DEDICATED_DATABASE",
+    instanceCompanyCode: instanceIdentity.companyCode,
+    instanceTenantKey: instanceIdentity.tenantKey,
+    isolationMode: instanceIdentity.dataIsolationMode,
     application: "StockFlow",
     exportedAt: new Date().toISOString(),
     recordCounts,

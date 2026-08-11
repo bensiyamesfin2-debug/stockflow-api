@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
 const prisma = require("../config/prisma");
+const { instanceIdentity } = require("../utils/instanceIdentity");
 
 async function authenticate(req, res, next) {
   const authorization = req.headers.authorization;
@@ -37,6 +38,7 @@ async function authenticate(req, res, next) {
     if (
       !user ||
       !user.isActive ||
+      payload.tenantKey !== instanceIdentity.tenantKey ||
       payload.tokenVersion !== user.tokenVersion
     ) {
       return res.status(401).json({
@@ -84,8 +86,19 @@ function authorizePlatformOwner(req, res, next) {
   return next();
 }
 
+function authorizeControlPlane(req, res, next) {
+  if (!instanceIdentity.controlPlane) {
+    return res.status(404).json({
+      success: false,
+      message: "Customer provisioning is only available in the StockFlow control plane",
+    });
+  }
+  return next();
+}
+
 module.exports = {
   authenticate,
   authorizeRoles,
   authorizePlatformOwner,
+  authorizeControlPlane,
 };

@@ -25,7 +25,9 @@ const testRoutes = require("./routes/testRoutes");
 const userRoutes = require("./routes/userRoutes");
 const workspaceRoutes = require("./routes/workspaceRoutes");
 const whatsappRoutes = require("./routes/whatsappRoutes");
+const tenantRoutes = require("./routes/tenantRoutes");
 const { authenticate, authorizeRoles } = require("./middleware/auth");
+const { instanceIdentity, publicInstanceIdentity } = require("./utils/instanceIdentity");
 
 const app = express();
 
@@ -109,8 +111,8 @@ app.get("/api/health", async (req, res) => {
     return res.json({
       success: true,
       message: "Inventory backend and database are ready",
-      instanceCompanyCode: process.env.INSTANCE_COMPANY_CODE || "bensiya-plc",
-      dataIsolationMode: "DEDICATED_DATABASE",
+      instanceCompanyCode: instanceIdentity.companyCode,
+      dataIsolationMode: instanceIdentity.dataIsolationMode,
     });
   } catch (error) {
     console.error("Health check failed:", error.message);
@@ -119,6 +121,10 @@ app.get("/api/health", async (req, res) => {
       message: "Inventory database is unavailable",
     });
   }
+});
+
+app.get("/api/instance", (req, res) => {
+  return res.json({ success: true, data: { instance: publicInstanceIdentity() } });
 });
 
 app.use("/api/auth", authRoutes);
@@ -143,6 +149,7 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/workspace", workspaceRoutes);
 app.use("/api/whatsapp", whatsappRoutes);
+app.use("/api/tenants", tenantRoutes);
 app.use(
   "/api/test",
   authenticate,

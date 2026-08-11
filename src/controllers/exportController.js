@@ -1,5 +1,6 @@
 const { createObjectCsvStringifier } = require("csv-writer");
 const prisma = require("../config/prisma");
+const { buildProfessionalWorkbook } = require("../utils/professionalWorkbook");
 
 function parseDate(value, endOfDay = false) {
   if (!value) return undefined;
@@ -194,4 +195,51 @@ async function exportProducts(req, res) {
   ], rows);
 }
 
-module.exports = { exportSales, exportInventory, exportProducts, sendCsv, parseDate };
+async function exportProfessionalWorkbook(req, res) {
+  const where = dateWhere(req, res);
+  if (where === null) return;
+  const from = parseDate(req.query.from);
+  const to = parseDate(req.query.to, true);
+
+  const [sales, inventory, products, workspaceSettings] = await Promise.all([
+    findAllSales({
+      where,
+      include: {
+        customer: { select: { id: true, name: true, phone: true } },
+        discount: { select: { code: true } },
+        cashier: { select: { fullName: true, username: true } },
+        items: { include: { product: true } },
+        payments: { include: { recordedBy: { select: { fullName: true, username: true } } } },
+      },
+    }),
+    prisma.inventory.findMany({
+      include: { product: { include: { category: true } } },
+      orderBy: { product: { name: "asc" } },
+    }),
+    prisma.product.findMany({
+      include: { category: true, inventory: true },
+      orderBy: [{ name: "asc" }, { thickness: "desc" }, { width: "desc" }, { length: "desc" }],
+    }),
+    prisma.workspaceSettings.findFirst({ orderBy: { id: "asc" } }),
+  ]);
+
+  const workbook = buildProfessionalWorkbook({
+    sales,
+    inventory,
+    products,
+    from,
+    to,
+    generatedAt: new Date(),
+    companyName: workspaceSettings?.companyName,
+    currency: workspaceSettings?.primaryCurrency,
+  });
+  const buffer = await workbook.xlsx.writeBuffer();
+  const filename = `stockflow-professional-export-${new Date().toISOString().slice(0, 10)}.xlsx`;
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.setHeader("Content-Length", buffer.byteLength);
+  res.setHeader("Cache-Control", "no-store");
+  return res.end(Buffer.from(buffer));
+}
+
+module.exports = { exportSales, exportInventory, exportProducts, exportProfessionalWorkbook, sendCsv, parseDate };

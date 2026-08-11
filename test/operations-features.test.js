@@ -12,6 +12,7 @@ const { normalizeDiscount } = require("../src/controllers/discountController");
 const { calculateDiscountCents } = require("../src/utils/discounts");
 const { centsToMoney } = require("../src/utils/money");
 const { sendCsv, parseDate } = require("../src/controllers/exportController");
+const { buildProfessionalWorkbook } = require("../src/utils/professionalWorkbook");
 const {
   validateSaleRequest,
   sumQuantityByProduct,
@@ -181,6 +182,36 @@ test("exports preserve an exact selected timestamp", () => {
     parseDate("2026-07-29T12:45:00.000Z").toISOString(),
     "2026-07-29T12:45:00.000Z"
   );
+});
+
+test("professional workbook separates ledgers and preserves payment destinations", async () => {
+  const product = { id: 1, sku: "603-100-20-2", name: "603", length: 100, width: 20, thickness: 2, costPrice: "600.00", sellingPrice: "900.00", isActive: true, createdAt: new Date("2026-08-01T08:00:00Z"), category: { name: "Granite" }, inventory: { reorderLevel: 3 } };
+  const sales = [{
+    id: 1,
+    saleNumber: "SALE-20260812-TEST",
+    status: "COMPLETED",
+    customerName: "Walk-in",
+    totalAmount: "1800.00",
+    discountAmount: "0.00",
+    creditBalance: "0.00",
+    creditDueAt: null,
+    createdAt: new Date("2026-08-12T09:30:00Z"),
+    customer: null,
+    cashier: { fullName: "Test Cashier", username: "cashier" },
+    discount: null,
+    items: [{ quantity: 2, releasedQuantity: 2, unitPrice: "900.00", customLength: null, customWidth: null, customThickness: null, product }],
+    payments: [{ paymentMethod: "BANK_TRANSFER", status: "COMPLETED", bankName: "Commercial Bank", recipientAccount: "1000123456789", transactionReference: "TX-100", amount: "1800.00", createdAt: new Date("2026-08-12T09:35:00Z"), recordedBy: { fullName: "Test Cashier" } }],
+  }];
+  const inventory = [{ quantity: 12, reservedQuantity: 0, reorderLevel: 3, updatedAt: new Date("2026-08-12T09:00:00Z"), product }];
+  const workbook = buildProfessionalWorkbook({ sales, inventory, products: [product], generatedAt: new Date("2026-08-12T10:00:00Z") });
+
+  assert.deepEqual(workbook.worksheets.map((sheet) => sheet.name), ["Executive Summary", "Sales Ledger", "Sale Items", "Payments", "Inventory", "Products"]);
+  assert.equal(workbook.getWorksheet("Payments").getCell("F2").value, "Commercial Bank");
+  assert.equal(workbook.getWorksheet("Payments").getCell("G2").value, "1000123456789");
+  assert.match(workbook.getWorksheet("Payments").getCell("I2").numFmt, /ETB/);
+  assert.equal(workbook.getWorksheet("Executive Summary").getCell("A1").value, "BENSIYA PLC · STOCKFLOW");
+  const buffer = await workbook.xlsx.writeBuffer();
+  assert.equal(Buffer.from(buffer).subarray(0, 2).toString(), "PK");
 });
 
 test("Sayin's trial catalogue keeps all supplied granite families and measurements", () => {

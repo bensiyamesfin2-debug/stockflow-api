@@ -1,4 +1,5 @@
 const prisma = require("../config/prisma");
+const { instanceIdentity } = require("../utils/instanceIdentity");
 const HttpError = require("../utils/HttpError");
 
 const SUPPORTED_CURRENCIES = new Set(["ETB", "USD", "EUR", "KES", "AED", "SAR"]);
@@ -56,7 +57,13 @@ async function getSettingsRecord() {
   const existing = await prisma.workspaceSettings.findFirst({ orderBy: { id: "asc" } });
   if (existing) return existing;
   return prisma.workspaceSettings.create({
-    data: { companyName: "Bensiya PLC", primaryCurrency: "ETB", locale: "en" },
+    data: {
+      companyName: instanceIdentity.companyName,
+      companyCode: instanceIdentity.companyCode.replaceAll("-", "_").toUpperCase(),
+      primaryCurrency: instanceIdentity.primaryCurrency,
+      locale: instanceIdentity.locale,
+      timezone: instanceIdentity.timezone,
+    },
   });
 }
 

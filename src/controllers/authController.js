@@ -8,6 +8,7 @@ const {
   hashPairingToken,
 } = require("../utils/loginPairing");
 const { verifyCode } = require("../utils/totp");
+const { instanceIdentity, publicInstanceIdentity } = require("../utils/instanceIdentity");
 
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const ACCOUNT_LOCK_MINUTES = 15;
@@ -24,7 +25,7 @@ function setupOrigins() {
 
 function issueSession(user) {
   const token = jwt.sign(
-    { role: user.role, tokenVersion: user.tokenVersion },
+    { role: user.role, tokenVersion: user.tokenVersion, tenantKey: instanceIdentity.tenantKey },
     process.env.JWT_SECRET,
     {
       subject: String(user.id),
@@ -40,6 +41,7 @@ function issueSession(user) {
       username: user.username,
       role: user.role,
       isPlatformOwner: Boolean(user.isPlatformOwner),
+      workspace: publicInstanceIdentity(),
     },
   };
 }

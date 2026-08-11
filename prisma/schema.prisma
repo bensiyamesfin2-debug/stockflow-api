@@ -78,6 +78,13 @@ enum QuotationStatus {
   CANCELLED
 }
 
+enum SaasTenantStatus {
+  PROVISIONING
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+}
+
 model User {
   id                   Int                 @id @default(autoincrement())
   fullName             String              @map("full_name") @db.VarChar(150)
@@ -108,7 +115,7 @@ model User {
   shifts               Shift[]
   preferences          UserPreference?
   notes                WorkspaceNote[]
-  calendarEvents       CalendarEvent[]      @relation("CalendarEventOwner")
+  calendarEvents       CalendarEvent[]     @relation("CalendarEventOwner")
   favorites            Favorite[]
   attachments          FileAttachment[]
   invoiceTemplates     InvoiceTemplate[]
@@ -117,11 +124,37 @@ model User {
   stockTransfers       StockTransfer[]     @relation("TransfersCreated")
   quotations           Quotation[]         @relation("QuotationsCreated")
   saleReturnsProcessed SaleReturn[]        @relation("SaleReturnsProcessed")
-  twoFactorSecret      String?              @map("two_factor_secret") @db.VarChar(128)
-  twoFactorEnabled     Boolean              @default(false) @map("two_factor_enabled")
-  isPlatformOwner      Boolean              @default(false) @map("is_platform_owner")
+  twoFactorSecret      String?             @map("two_factor_secret") @db.VarChar(128)
+  twoFactorEnabled     Boolean             @default(false) @map("two_factor_enabled")
+  isPlatformOwner      Boolean             @default(false) @map("is_platform_owner")
+  tenantsCreated       SaasTenant[]        @relation("SaasTenantCreatedBy")
 
   @@map("users")
+}
+
+model SaasTenant {
+  id                String           @id @default(uuid()) @db.Uuid
+  companyName       String           @map("company_name") @db.VarChar(160)
+  companyCode       String           @unique @map("company_code") @db.VarChar(40)
+  slug              String           @unique @db.VarChar(80)
+  status            SaasTenantStatus @default(PROVISIONING)
+  plan              String           @default("GROWTH") @db.VarChar(24)
+  primaryCurrency   String           @default("ETB") @map("primary_currency") @db.VarChar(3)
+  locale            String           @default("en") @db.VarChar(10)
+  timezone          String           @default("Africa/Addis_Ababa") @db.VarChar(64)
+  region            String           @default("africa-east1") @db.VarChar(48)
+  deploymentUrl     String?          @unique @map("deployment_url") @db.VarChar(500)
+  databaseIsolation String           @default("DEDICATED_DATABASE") @map("database_isolation") @db.VarChar(32)
+  notes             String?
+  createdById       Int?             @map("created_by_id")
+  activatedAt       DateTime?        @map("activated_at") @db.Timestamptz(3)
+  createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy         User?            @relation("SaasTenantCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([createdById])
+  @@map("saas_tenants")
 }
 
 model LoginPairing {
@@ -139,24 +172,24 @@ model LoginPairing {
 }
 
 model Product {
-  id                 Int                 @id @default(autoincrement())
-  sku                String              @unique @db.VarChar(100)
-  name               String              @db.VarChar(200)
+  id                 Int                        @id @default(autoincrement())
+  sku                String                     @unique @db.VarChar(100)
+  name               String                     @db.VarChar(200)
   length             Int?
   width              Int?
   thickness          Int?
   description        String?
-  sellingPrice       Decimal             @map("selling_price") @db.Decimal(12, 2)
-  costPrice          Decimal?            @map("cost_price") @db.Decimal(12, 2)
-  categoryId         Int?                @map("category_id")
-  isActive           Boolean             @default(true) @map("is_active")
-  createdAt          DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt          DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+  sellingPrice       Decimal                    @map("selling_price") @db.Decimal(12, 2)
+  costPrice          Decimal?                   @map("cost_price") @db.Decimal(12, 2)
+  categoryId         Int?                       @map("category_id")
+  isActive           Boolean                    @default(true) @map("is_active")
+  createdAt          DateTime                   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime                   @updatedAt @map("updated_at") @db.Timestamptz(3)
   inventory          Inventory?
   saleItems          SaleItem[]
   stockReceiptItems  StockReceiptItem[]
   inventoryMovements InventoryMovement[]
-  category           Category?           @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  category           Category?                  @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   purchaseOrderItems PurchaseOrderItem[]
   stockCountItems    StockCountItem[]
   locationBalances   InventoryLocationBalance[]
@@ -319,16 +352,16 @@ model StockReceipt {
 }
 
 model StockReceiptItem {
-  id        Int          @id @default(autoincrement())
-  receiptId Int          @map("receipt_id")
-  productId Int          @map("product_id")
-  quantity  Int
+  id              Int          @id @default(autoincrement())
+  receiptId       Int          @map("receipt_id")
+  productId       Int          @map("product_id")
+  quantity        Int
   unitCost        Decimal?     @map("unit_cost") @db.Decimal(12, 2)
   damagedQuantity Int          @default(0) @map("damaged_quantity")
   batchId         Int?         @unique @map("batch_id")
-  receipt   StockReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
-  product   Product      @relation(fields: [productId], references: [id], onDelete: Restrict)
-  batch     StockBatch?  @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  receipt         StockReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  product         Product      @relation(fields: [productId], references: [id], onDelete: Restrict)
+  batch           StockBatch?  @relation(fields: [batchId], references: [id], onDelete: SetNull)
 
   @@unique([receiptId, productId])
   @@index([productId])
@@ -355,20 +388,20 @@ model InventoryMovement {
 }
 
 model InventoryLocation {
-  id        Int      @id @default(autoincrement())
-  code      String   @unique @db.VarChar(80)
-  name      String   @db.VarChar(120)
-  warehouse String?  @db.VarChar(120)
-  rowLabel  String?  @map("row_label") @db.VarChar(60)
-  rack      String?  @db.VarChar(60)
-  slot      String?  @db.VarChar(60)
-  isActive  Boolean  @default(true) @map("is_active")
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
-  balances  InventoryLocationBalance[]
-  batches   StockBatch[]
-  transfersFrom StockTransfer[] @relation("TransferFrom")
-  transfersTo   StockTransfer[] @relation("TransferTo")
+  id            Int                        @id @default(autoincrement())
+  code          String                     @unique @db.VarChar(80)
+  name          String                     @db.VarChar(120)
+  warehouse     String?                    @db.VarChar(120)
+  rowLabel      String?                    @map("row_label") @db.VarChar(60)
+  rack          String?                    @db.VarChar(60)
+  slot          String?                    @db.VarChar(60)
+  isActive      Boolean                    @default(true) @map("is_active")
+  createdAt     DateTime                   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime                   @updatedAt @map("updated_at") @db.Timestamptz(3)
+  balances      InventoryLocationBalance[]
+  batches       StockBatch[]
+  transfersFrom StockTransfer[]            @relation("TransferFrom")
+  transfersTo   StockTransfer[]            @relation("TransferTo")
   returnItems   SaleReturnItem[]
 
   @@map("inventory_locations")
@@ -389,24 +422,24 @@ model InventoryLocationBalance {
 }
 
 model StockBatch {
-  id                Int                @id @default(autoincrement())
-  batchNumber       String             @unique @map("batch_number") @db.VarChar(120)
-  productId         Int                @map("product_id")
-  receiptId         Int?               @map("receipt_id")
-  supplierId        Int?               @map("supplier_id")
-  locationId        Int?               @map("location_id")
-  origin            String?            @db.VarChar(120)
-  color             String?            @db.VarChar(120)
-  grade             String?            @db.VarChar(80)
-  originalQuantity  Int                @map("original_quantity")
-  availableQuantity Int                @map("available_quantity")
+  id                Int                 @id @default(autoincrement())
+  batchNumber       String              @unique @map("batch_number") @db.VarChar(120)
+  productId         Int                 @map("product_id")
+  receiptId         Int?                @map("receipt_id")
+  supplierId        Int?                @map("supplier_id")
+  locationId        Int?                @map("location_id")
+  origin            String?             @db.VarChar(120)
+  color             String?             @db.VarChar(120)
+  grade             String?             @db.VarChar(80)
+  originalQuantity  Int                 @map("original_quantity")
+  availableQuantity Int                 @map("available_quantity")
   notes             String?
-  createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt         DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
-  product           Product            @relation(fields: [productId], references: [id], onDelete: Restrict)
-  receipt           StockReceipt?      @relation(fields: [receiptId], references: [id], onDelete: SetNull)
-  supplier          Supplier?          @relation(fields: [supplierId], references: [id], onDelete: SetNull)
-  location          InventoryLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+  product           Product             @relation(fields: [productId], references: [id], onDelete: Restrict)
+  receipt           StockReceipt?       @relation(fields: [receiptId], references: [id], onDelete: SetNull)
+  supplier          Supplier?           @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  location          InventoryLocation?  @relation(fields: [locationId], references: [id], onDelete: SetNull)
   receiptItem       StockReceiptItem?
   transferItems     StockTransferItem[]
 
@@ -416,20 +449,20 @@ model StockBatch {
 }
 
 model DeliveryProof {
-  id                 Int              @id @default(autoincrement())
-  releaseId          Int              @unique @map("release_id")
-  deliveredById      Int              @map("delivered_by_id")
-  receiverName       String           @map("receiver_name") @db.VarChar(150)
-  receiverPhone      String?          @map("receiver_phone") @db.VarChar(40)
-  signatureName      String?          @map("signature_name") @db.VarChar(150)
-  photoName          String?          @map("photo_name") @db.VarChar(180)
-  photoMimeType      String?          @map("photo_mime_type") @db.VarChar(100)
-  photoContent       String?          @map("photo_content")
-  notes              String?
-  deliveredAt        DateTime         @default(now()) @map("delivered_at") @db.Timestamptz(3)
-  createdAt          DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
-  release            InventoryRelease @relation(fields: [releaseId], references: [id], onDelete: Cascade)
-  deliveredBy        User             @relation("DeliveredBy", fields: [deliveredById], references: [id], onDelete: Restrict)
+  id            Int              @id @default(autoincrement())
+  releaseId     Int              @unique @map("release_id")
+  deliveredById Int              @map("delivered_by_id")
+  receiverName  String           @map("receiver_name") @db.VarChar(150)
+  receiverPhone String?          @map("receiver_phone") @db.VarChar(40)
+  signatureName String?          @map("signature_name") @db.VarChar(150)
+  photoName     String?          @map("photo_name") @db.VarChar(180)
+  photoMimeType String?          @map("photo_mime_type") @db.VarChar(100)
+  photoContent  String?          @map("photo_content")
+  notes         String?
+  deliveredAt   DateTime         @default(now()) @map("delivered_at") @db.Timestamptz(3)
+  createdAt     DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  release       InventoryRelease @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  deliveredBy   User             @relation("DeliveredBy", fields: [deliveredById], references: [id], onDelete: Restrict)
 
   @@index([deliveredAt])
   @@map("delivery_proofs")
@@ -468,17 +501,17 @@ model PriceListItem {
 }
 
 model StockTransfer {
-  id             Int                    @id @default(autoincrement())
-  transferNumber String                 @unique @map("transfer_number") @db.VarChar(60)
-  fromLocationId Int                    @map("from_location_id")
-  toLocationId   Int                    @map("to_location_id")
-  transferredById Int                   @map("transferred_by_id")
-  notes          String?
-  createdAt      DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
-  fromLocation   InventoryLocation      @relation("TransferFrom", fields: [fromLocationId], references: [id], onDelete: Restrict)
-  toLocation     InventoryLocation      @relation("TransferTo", fields: [toLocationId], references: [id], onDelete: Restrict)
-  transferredBy  User                   @relation("TransfersCreated", fields: [transferredById], references: [id], onDelete: Restrict)
-  items          StockTransferItem[]
+  id              Int                 @id @default(autoincrement())
+  transferNumber  String              @unique @map("transfer_number") @db.VarChar(60)
+  fromLocationId  Int                 @map("from_location_id")
+  toLocationId    Int                 @map("to_location_id")
+  transferredById Int                 @map("transferred_by_id")
+  notes           String?
+  createdAt       DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  fromLocation    InventoryLocation   @relation("TransferFrom", fields: [fromLocationId], references: [id], onDelete: Restrict)
+  toLocation      InventoryLocation   @relation("TransferTo", fields: [toLocationId], references: [id], onDelete: Restrict)
+  transferredBy   User                @relation("TransfersCreated", fields: [transferredById], references: [id], onDelete: Restrict)
+  items           StockTransferItem[]
 
   @@index([fromLocationId, createdAt])
   @@index([toLocationId, createdAt])
@@ -501,22 +534,22 @@ model StockTransferItem {
 }
 
 model Quotation {
-  id             Int             @id @default(autoincrement())
-  quoteNumber    String          @unique @map("quote_number") @db.VarChar(60)
-  customerId     Int?            @map("customer_id")
-  customerName   String?         @map("customer_name") @db.VarChar(150)
-  customerPhone  String?         @map("customer_phone") @db.VarChar(40)
-  createdById    Int             @map("created_by_id")
-  status         QuotationStatus @default(DRAFT)
-  validUntil     DateTime?       @map("valid_until") @db.Timestamptz(3)
-  notes          String?
-  totalAreaSqm   Decimal         @default(0) @map("total_area_sqm") @db.Decimal(14, 3)
-  totalAmount    Decimal         @default(0) @map("total_amount") @db.Decimal(12, 2)
-  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
-  customer       Customer?       @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  createdBy      User            @relation("QuotationsCreated", fields: [createdById], references: [id], onDelete: Restrict)
-  items          QuotationItem[]
+  id            Int             @id @default(autoincrement())
+  quoteNumber   String          @unique @map("quote_number") @db.VarChar(60)
+  customerId    Int?            @map("customer_id")
+  customerName  String?         @map("customer_name") @db.VarChar(150)
+  customerPhone String?         @map("customer_phone") @db.VarChar(40)
+  createdById   Int             @map("created_by_id")
+  status        QuotationStatus @default(DRAFT)
+  validUntil    DateTime?       @map("valid_until") @db.Timestamptz(3)
+  notes         String?
+  totalAreaSqm  Decimal         @default(0) @map("total_area_sqm") @db.Decimal(14, 3)
+  totalAmount   Decimal         @default(0) @map("total_amount") @db.Decimal(12, 2)
+  createdAt     DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  customer      Customer?       @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  createdBy     User            @relation("QuotationsCreated", fields: [createdById], references: [id], onDelete: Restrict)
+  items         QuotationItem[]
 
   @@index([customerId, createdAt])
   @@index([status, createdAt])
@@ -544,17 +577,17 @@ model QuotationItem {
 }
 
 model SaleReturn {
-  id            Int            @id @default(autoincrement())
-  returnNumber  String         @unique @map("return_number") @db.VarChar(60)
-  saleId        Int            @map("sale_id")
-  processedById Int            @map("processed_by_id")
+  id            Int              @id @default(autoincrement())
+  returnNumber  String           @unique @map("return_number") @db.VarChar(60)
+  saleId        Int              @map("sale_id")
+  processedById Int              @map("processed_by_id")
   reason        String
-  returnValue   Decimal        @map("return_value") @db.Decimal(12, 2)
-  refundAmount  Decimal        @default(0) @map("refund_amount") @db.Decimal(12, 2)
-  refundMethod  PaymentMethod? @map("refund_method")
-  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
-  sale          Sale           @relation(fields: [saleId], references: [id], onDelete: Restrict)
-  processedBy   User           @relation("SaleReturnsProcessed", fields: [processedById], references: [id], onDelete: Restrict)
+  returnValue   Decimal          @map("return_value") @db.Decimal(12, 2)
+  refundAmount  Decimal          @default(0) @map("refund_amount") @db.Decimal(12, 2)
+  refundMethod  PaymentMethod?   @map("refund_method")
+  createdAt     DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  sale          Sale             @relation(fields: [saleId], references: [id], onDelete: Restrict)
+  processedBy   User             @relation("SaleReturnsProcessed", fields: [processedById], references: [id], onDelete: Restrict)
   items         SaleReturnItem[]
 
   @@index([saleId, createdAt])
@@ -562,15 +595,15 @@ model SaleReturn {
 }
 
 model SaleReturnItem {
-  id           Int          @id @default(autoincrement())
-  returnId     Int          @map("return_id")
-  saleItemId   Int          @map("sale_item_id")
-  quantity     Int
-  restocked    Boolean      @default(true)
-  locationId   Int?         @map("location_id")
-  saleReturn   SaleReturn   @relation(fields: [returnId], references: [id], onDelete: Cascade)
-  saleItem     SaleItem     @relation(fields: [saleItemId], references: [id], onDelete: Restrict)
-  location     InventoryLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  id         Int                @id @default(autoincrement())
+  returnId   Int                @map("return_id")
+  saleItemId Int                @map("sale_item_id")
+  quantity   Int
+  restocked  Boolean            @default(true)
+  locationId Int?               @map("location_id")
+  saleReturn SaleReturn         @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  saleItem   SaleItem           @relation(fields: [saleItemId], references: [id], onDelete: Restrict)
+  location   InventoryLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
 
   @@index([saleItemId])
   @@index([locationId])
@@ -670,19 +703,19 @@ model Supplier {
 }
 
 model Customer {
-  id        Int      @id @default(autoincrement())
-  name      String   @db.VarChar(150)
-  phone     String?  @db.VarChar(40)
-  email     String?  @db.VarChar(254)
-  address   String?
-  notes     String?
-  priceListId Int?      @map("price_list_id")
-  isActive  Boolean  @default(true) @map("is_active")
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
-  sales     Sale[]
-  quotations Quotation[]
-  priceList PriceList?  @relation(fields: [priceListId], references: [id], onDelete: SetNull)
+  id          Int         @id @default(autoincrement())
+  name        String      @db.VarChar(150)
+  phone       String?     @db.VarChar(40)
+  email       String?     @db.VarChar(254)
+  address     String?
+  notes       String?
+  priceListId Int?        @map("price_list_id")
+  isActive    Boolean     @default(true) @map("is_active")
+  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  sales       Sale[]
+  quotations  Quotation[]
+  priceList   PriceList?  @relation(fields: [priceListId], references: [id], onDelete: SetNull)
 
   @@index([name])
   @@index([phone])
@@ -801,17 +834,17 @@ model Shift {
 }
 
 model WorkspaceSettings {
-  id                 Int      @id @default(autoincrement())
-  companyName        String   @default("Bensiya PLC") @map("company_name") @db.VarChar(160)
-  companyCode        String?  @map("company_code") @db.VarChar(40)
-  primaryCurrency    String   @default("ETB") @map("primary_currency") @db.VarChar(3)
-  locale             String   @default("en") @db.VarChar(10)
-  timezone           String   @default("Africa/Addis_Ababa") @db.VarChar(64)
-  invoiceEmail       String?  @map("invoice_email") @db.VarChar(254)
-  invoicePhone       String?  @map("invoice_phone") @db.VarChar(40)
-  updatedById        Int?     @map("updated_by_id")
-  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  id              Int      @id @default(autoincrement())
+  companyName     String   @default("Bensiya PLC") @map("company_name") @db.VarChar(160)
+  companyCode     String?  @map("company_code") @db.VarChar(40)
+  primaryCurrency String   @default("ETB") @map("primary_currency") @db.VarChar(3)
+  locale          String   @default("en") @db.VarChar(10)
+  timezone        String   @default("Africa/Addis_Ababa") @db.VarChar(64)
+  invoiceEmail    String?  @map("invoice_email") @db.VarChar(254)
+  invoicePhone    String?  @map("invoice_phone") @db.VarChar(40)
+  updatedById     Int?     @map("updated_by_id")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   @@map("workspace_settings")
 }

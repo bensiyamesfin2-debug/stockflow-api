@@ -60,7 +60,16 @@ test("admin password resets require reauthentication and invalidate sessions", (
 
 test("production identity reports dedicated-database isolation without exposing credentials", () => {
   const app = source("src/app.js");
-  assert.match(app, /dataIsolationMode: "DEDICATED_DATABASE"/);
-  assert.match(app, /INSTANCE_COMPANY_CODE/);
+  const identity = source("src/utils/instanceIdentity.js");
+  assert.match(app, /instanceIdentity\.dataIsolationMode/);
+  assert.match(identity, /dataIsolationMode: "DEDICATED_DATABASE"/);
+  assert.match(identity, /INSTANCE_COMPANY_CODE/);
   assert.doesNotMatch(app, /DATABASE_URL.*res\.json/);
+});
+
+test("sessions are cryptographically bound to one customer instance", () => {
+  const auth = source("src/controllers/authController.js");
+  const middleware = source("src/middleware/auth.js");
+  assert.match(auth, /tenantKey: instanceIdentity\.tenantKey/);
+  assert.match(middleware, /payload\.tenantKey !== instanceIdentity\.tenantKey/);
 });
