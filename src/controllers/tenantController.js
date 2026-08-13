@@ -1,6 +1,7 @@
 const prisma = require("../config/prisma");
 const crypto = require("crypto");
 const { instanceIdentity, SLUG_PATTERN } = require("../utils/instanceIdentity");
+const { renderConfig, createDatabase, getDatabase, getDatabaseConnection, createBackendService, getService, getDeploy, customerWorkspaceUrl, ProvisioningError } = require("../utils/renderProvisioning");
 
 const PLANS = new Set(["STARTER", "GROWTH", "ENTERPRISE"]);
 const STATUSES = new Set(["PROVISIONING", "ACTIVE", "SUSPENDED", "ARCHIVED"]);
@@ -54,6 +55,11 @@ function serializeTenant(tenant) {
   return { ...safeTenant, monitoringConfigured: Boolean(monitoringTokenHash), provisioningConfig: provisioningConfig(tenant) };
 }
 
+function automationCapability() {
+  const config = renderConfig();
+  return { configured: config.configured, provider: "RENDER", databasePlan: config.databasePlan, servicePlan: config.servicePlan, region: config.region, frontendUrl: config.frontendUrl };
+}
+
 async function ensureCurrentTenant() {
   return prisma.saasTenant.upsert({
     where: { slug: instanceIdentity.companyCode },
@@ -65,6 +71,9 @@ async function ensureCurrentTenant() {
       region: instanceIdentity.region,
       plan: instanceIdentity.plan,
       deploymentUrl: instanceIdentity.publicUrl || undefined,
+      provisioningStatus: "COMPLETED",
+      provisioningStep: "READY",
+      provisioningCompletedAt: new Date(),
     },
     create: {
       companyName: instanceIdentity.companyName,
@@ -78,6 +87,9 @@ async function ensureCurrentTenant() {
       region: instanceIdentity.region,
       deploymentUrl: instanceIdentity.publicUrl,
       databaseIsolation: instanceIdentity.dataIsolationMode,
+      provisioningStatus: "COMPLETED",
+      provisioningStep: "READY",
+      provisioningCompletedAt: new Date(),
       activatedAt: new Date(),
     },
   });
@@ -89,7 +101,76 @@ async function listTenants(req, res) {
     include: { createdBy: { select: { id: true, fullName: true, username: true } } },
     orderBy: [{ status: "asc" }, { companyName: "asc" }],
   });
-  return res.json({ success: true, data: { tenants: tenants.map(serializeTenant) } });
+  return res.json({ success: true, data: { tenants: tenants.map(serializeTenant), automation: automationCapability() } });
+}
+
+async function resolveTenant(req, res) {
+  const slug = clean(req.params.slug, 80).toLowerCase();
+  if (!SLUG_PATTERN.test(slug)) return res.status(404).json({ success: false, message: "Customer workspace not found" });
+  const tenant = await prisma.saasTenant.findFirst({ where: { slug, status: "ACTIVE", provisioningStatus: "COMPLETED", backendUrl: { not: null } }, select: { companyName: true, slug: true, backendUrl: true } });
+  if (!tenant) return res.status(404).json({ success: false, message: "Customer workspace is not active" });
+  return res.json({ success: true, data: tenant });
+}
+
+function provisioningControlPlaneUrl(req) {
+  return String(process.env.CONTROL_PLANE_PUBLIC_URL || process.env.INSTANCE_API_URL || `${req.protocol}://${req.get("host")}`).replace(/\/$/, "");
+}
+
+async function provisionTenant(req, res) {
+  const id = String(req.params.id || "");
+  const confirmation = String(req.body.confirmation || "");
+  const config = renderConfig();
+  if (!config.configured) return res.status(503).json({ success: false, message: "Automated provisioning needs RENDER_API_KEY and RENDER_OWNER_ID in the control-plane environment" });
+  const tenant = await prisma.saasTenant.findUnique({ where: { id } });
+  if (!tenant) return res.status(404).json({ success: false, message: "Customer workspace not found" });
+  if (confirmation !== tenant.companyName) return res.status(400).json({ success: false, message: `Type ${tenant.companyName} exactly to approve new cloud resources and billing` });
+  if (tenant.status === "ACTIVE" && tenant.backendUrl) return res.json({ success: true, message: "This customer system is already active", data: { tenant: serializeTenant(tenant) } });
+
+  let current = tenant;
+  try {
+    await prisma.saasTenant.update({ where: { id }, data: { provisioningStatus: "RUNNING", provisioningError: null, provisioningStartedAt: tenant.provisioningStartedAt || new Date() } });
+    if (!current.providerDatabaseId) {
+      await prisma.saasTenant.update({ where: { id }, data: { provisioningStep: "CREATING_DATABASE", provider: "RENDER" } });
+      const database = await createDatabase(config, current);
+      current = await prisma.saasTenant.update({ where: { id }, data: { providerDatabaseId: database.id, provider: "RENDER", provisioningStep: "WAITING_FOR_DATABASE" } });
+      return res.status(202).json({ success: true, message: "Dedicated database creation started. Progress will continue automatically.", data: { tenant: serializeTenant(current) } });
+    }
+
+    if (!current.providerServiceId) {
+      await prisma.saasTenant.update({ where: { id }, data: { provisioningStep: "WAITING_FOR_DATABASE" } });
+      const database = await getDatabase(config, current.providerDatabaseId);
+      if (!["available", "running"].includes(String(database.status || "").toLowerCase())) {
+        return res.status(202).json({ success: true, message: `Dedicated database is ${String(database.status || "being prepared").toLowerCase()}.`, data: { tenant: serializeTenant(await prisma.saasTenant.findUnique({ where: { id } })) } });
+      }
+      const connection = await getDatabaseConnection(config, current.providerDatabaseId);
+      const monitoringToken = crypto.randomBytes(32).toString("base64url");
+      await prisma.saasTenant.update({ where: { id }, data: { monitoringTokenHash: hashToken(monitoringToken), provisioningStep: "CREATING_BACKEND" } });
+      const created = await createBackendService(config, current, connection.internalConnectionString, monitoringToken, provisioningControlPlaneUrl(req));
+      const service = created.service || created;
+      current = await prisma.saasTenant.update({ where: { id }, data: { providerServiceId: service.id, providerDeployId: created.deployId || null, backendUrl: service.serviceDetails?.url || null, provisioningStep: "DEPLOYING_BACKEND" } });
+      return res.status(202).json({ success: true, message: "Database is ready and the customer backend is deploying.", data: { tenant: serializeTenant(current) } });
+    }
+
+    const service = await getService(config, current.providerServiceId);
+    const backendUrl = service.serviceDetails?.url || current.backendUrl;
+    let deployStatus = "unknown";
+    if (current.providerDeployId) {
+      const deploy = await getDeploy(config, current.providerServiceId, current.providerDeployId);
+      deployStatus = String(deploy.status || "unknown").toLowerCase();
+      if (["build_failed", "update_failed", "canceled", "deactivated"].includes(deployStatus)) throw new ProvisioningError(`Customer backend deployment ended with ${deployStatus}`);
+    }
+    if (!backendUrl || !["live", "succeeded"].includes(deployStatus)) {
+      current = await prisma.saasTenant.update({ where: { id }, data: { backendUrl: backendUrl || null, provisioningStep: "DEPLOYING_BACKEND" } });
+      return res.status(202).json({ success: true, message: `Customer backend is ${deployStatus === "unknown" ? "deploying" : deployStatus.replaceAll("_", " ")}.`, data: { tenant: serializeTenant(current) } });
+    }
+    current = await prisma.saasTenant.update({ where: { id }, data: { status: "ACTIVE", deploymentUrl: customerWorkspaceUrl(config, current), backendUrl, provisioningStatus: "COMPLETED", provisioningStep: "READY", provisioningCompletedAt: new Date(), activatedAt: current.activatedAt || new Date() } });
+    await prisma.auditLog.create({ data: { userId: req.user.id, action: "PROVISION_SAAS_TENANT", entityType: "SAAS_TENANT", details: { tenantId: id, provider: "RENDER", databaseIsolation: "DEDICATED_DATABASE" } } });
+    return res.json({ success: true, message: `${current.companyName} is live with an isolated database.`, data: { tenant: serializeTenant(current) } });
+  } catch (error) {
+    const message = error instanceof ProvisioningError ? error.message : "Cloud provisioning paused because the provider returned an unexpected error";
+    await prisma.saasTenant.update({ where: { id }, data: { provisioningStatus: "FAILED", provisioningError: message } }).catch(() => undefined);
+    return res.status(error.statusCode || 502).json({ success: false, message });
+  }
 }
 
 async function createTenant(req, res) {
@@ -254,4 +335,4 @@ async function resolveIncident(req, res) {
   return res.json({ success: true, message: "Incident marked resolved" });
 }
 
-module.exports = { listTenants, createTenant, updateTenant, operationsOverview, rotateMonitoringToken, resolveIncident, provisioningConfig, serializeTenant, operationalHealth };
+module.exports = { listTenants, resolveTenant, createTenant, updateTenant, provisionTenant, operationsOverview, rotateMonitoringToken, resolveIncident, provisioningConfig, serializeTenant, operationalHealth, automationCapability };

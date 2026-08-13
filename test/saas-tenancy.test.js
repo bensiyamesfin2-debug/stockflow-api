@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const { readInstanceIdentity } = require("../src/utils/instanceIdentity");
+const { renderConfig, customerWorkspaceUrl } = require("../src/utils/renderProvisioning");
 
 function source(relativePath) {
   return fs.readFileSync(path.join(__dirname, "..", relativePath), "utf8");
@@ -60,4 +61,28 @@ test("tenant monitoring stores hashed credentials and metadata-only error aggreg
   assert.match(routes, /authorizePlatformOwner, authorizeControlPlane/);
   assert.match(routes, /\/operations/);
   assert.match(routes, /errors\/:incidentId\/resolve/);
+});
+
+test("automated tenant provisioning is explicit, isolated, resumable, and secret-safe", () => {
+  const migration = source("prisma/migrations/20260813203000_add_tenant_provisioning_state/migration.sql");
+  const adapter = source("src/utils/renderProvisioning.js");
+  const controller = source("src/controllers/tenantController.js");
+  const routes = source("src/routes/tenantRoutes.js");
+  const disabled = renderConfig({});
+  const enabled = renderConfig({ RENDER_API_KEY: "test-key", RENDER_OWNER_ID: "tea-test", STOCKFLOW_FRONTEND_URL: "https://stockflow.example/" });
+
+  assert.equal(disabled.configured, false);
+  assert.equal(enabled.configured, true);
+  assert.equal(enabled.databasePlan, "basic_256mb");
+  assert.equal(customerWorkspaceUrl(enabled, { slug: "acme-ltd" }), "https://stockflow.example/?workspace=acme-ltd");
+  assert.match(migration, /provider_database_id/);
+  assert.match(migration, /provider_service_id/);
+  assert.match(adapter, /connection-info/);
+  assert.match(adapter, /crypto\.randomBytes/);
+  assert.match(controller, /confirmation !== tenant\.companyName/);
+  assert.match(controller, /provisioningStatus: "COMPLETED"/);
+  assert.match(routes, /\/resolve\/:slug/);
+  assert.match(routes, /\/:id\/provision/);
+  assert.match(controller, /connection\.internalConnectionString/);
+  assert.doesNotMatch(controller, /DATABASE_URL.*res\.(json|send)/);
 });
