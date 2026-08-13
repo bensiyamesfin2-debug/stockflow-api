@@ -75,7 +75,7 @@ async function ensureCurrentTenant() {
       provisioningStatus: "COMPLETED",
       provisioningStep: "READY",
       provisioningCompletedAt: new Date(),
-      subscriptionExempt: true,
+      subscriptionExempt: false,
     },
     create: {
       companyName: instanceIdentity.companyName,
@@ -92,7 +92,7 @@ async function ensureCurrentTenant() {
       provisioningStatus: "COMPLETED",
       provisioningStep: "READY",
       provisioningCompletedAt: new Date(),
-      subscriptionExempt: true,
+      subscriptionExempt: false,
       activatedAt: new Date(),
     },
   });

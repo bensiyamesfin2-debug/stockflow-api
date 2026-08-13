@@ -102,6 +102,8 @@ test("monthly subscriptions pause safely and preserve an auditable revenue ledge
   assert.equal(subscriptionAccess({ companyName: "Acme", status: "ACTIVE", subscriptionExempt: false, subscriptionEndsAt: null }, now).allowed, false);
   assert.match(migration, /monthly_price_minor/);
   assert.match(migration, /CREATE TABLE "tenant_subscription_payments"/);
+  assert.match(source("prisma/migrations/20260814090000_bill_bensiya_subscription/migration.sql"), /subscription_exempt" = false/);
+  assert.match(controller, /subscriptionExempt: false/);
   assert.match(controller, /RENEW_TENANT_SUBSCRIPTION/);
   assert.match(controller, /collectedThisMonthMinor/);
   assert.match(routes, /subscription\/renew/);

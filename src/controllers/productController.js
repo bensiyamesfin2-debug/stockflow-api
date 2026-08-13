@@ -185,6 +185,7 @@ const IMPORT_HEADERS = {
   sellingPrice: ["selling price", "selling price etb", "price", "sale price"],
   costPrice: ["cost price", "cost price etb", "cost", "unit cost"],
   reorderLevel: ["reorder level", "reorder", "minimum stock"],
+  quantity: ["quantity to add", "opening quantity", "opening stock", "quantity", "stock quantity"],
   description: ["description", "notes"],
   isActive: ["active", "is active", "status"],
 };
@@ -240,6 +241,11 @@ async function parseProductWorkbook(buffer) {
       else errors.push(`Row ${rowNumber}: Measurement must look like 220 x 34 x 3`);
     }
     const category = columns.category ? cellText(row.getCell(columns.category)).replace(/\s+/g, " ") : "";
+    const quantityText = columns.quantity ? cellText(row.getCell(columns.quantity)) : "0";
+    const quantityToAdd = Number(quantityText || 0);
+    if (!Number.isInteger(quantityToAdd) || quantityToAdd < 0 || quantityToAdd > 10_000_000) {
+      errors.push(`Row ${rowNumber}: Quantity to Add must be a whole number from 0 to 10,000,000`);
+    }
     const input = {
       name,
       length,
@@ -255,7 +261,7 @@ async function parseProductWorkbook(buffer) {
     errors.push(...validated.errors.map((error) => `Row ${rowNumber}: ${error}`));
     if (category.length > 120) errors.push(`Row ${rowNumber}: Category cannot exceed 120 characters`);
     if (category && category.length < 2) errors.push(`Row ${rowNumber}: Category must be at least 2 characters`);
-    if (validated.errors.length || (category && (category.length < 2 || category.length > 120))) continue;
+    if (validated.errors.length || !Number.isInteger(quantityToAdd) || quantityToAdd < 0 || quantityToAdd > 10_000_000 || (category && (category.length < 2 || category.length > 120))) continue;
 
     const sku = makeInternalSku(validated.data.name, validated.data.length, validated.data.width, validated.data.thickness);
     if (seenSkus.has(sku)) {
@@ -263,7 +269,7 @@ async function parseProductWorkbook(buffer) {
       continue;
     }
     seenSkus.set(sku, rowNumber);
-    rows.push({ rowNumber, sku, category: category || null, data: validated.data, reorderLevel: validated.reorderLevel });
+    rows.push({ rowNumber, sku, category: category || null, data: validated.data, reorderLevel: validated.reorderLevel, quantityToAdd });
   }
   if (worksheet.actualRowCount > 2001) errors.push("The workbook exceeds the 2,000 product row limit");
   if (!rows.length && !errors.length) errors.push("The workbook does not contain any product rows");
@@ -289,10 +295,12 @@ async function productImportPlan(buffer, role) {
       measurement: measurementKey(row.data.length, row.data.width, row.data.thickness),
       category: row.category,
       sellingPrice: row.data.sellingPrice,
+      quantityToAdd: row.quantityToAdd,
       action: existingSkus.has(row.sku) ? "UPDATE" : "CREATE",
     })),
     creates: parsed.rows.filter((row) => !existingSkus.has(row.sku)).length,
     updates: parsed.rows.filter((row) => existingSkus.has(row.sku)).length,
+    unitsToAdd: parsed.rows.reduce((sum, row) => sum + row.quantityToAdd, 0),
     categoriesToCreate,
     parsedRows: parsed.rows,
   };
@@ -304,7 +312,7 @@ async function previewProductImport(req, res) {
     success: plan.errors.length === 0,
     message: plan.errors.length ? "Fix the workbook errors before importing" : "Workbook validated and ready to import",
     errors: plan.errors,
-    data: { preview: { rows: plan.rows, creates: plan.creates, updates: plan.updates, categoriesToCreate: plan.categoriesToCreate } },
+    data: { preview: { rows: plan.rows, creates: plan.creates, updates: plan.updates, unitsToAdd: plan.unitsToAdd, categoriesToCreate: plan.categoriesToCreate } },
   });
 }
 
@@ -333,13 +341,20 @@ async function importProducts(req, res) {
       const product = existing
         ? await transaction.product.update({ where: { id: existing.id }, data: productData })
         : await transaction.product.create({ data: productData });
-      await transaction.inventory.upsert({
+      const inventory = await transaction.inventory.upsert({
         where: { productId: product.id },
-        create: { productId: product.id, quantity: 0, reservedQuantity: 0, reorderLevel: row.reorderLevel },
-        update: { reorderLevel: row.reorderLevel },
+        create: { productId: product.id, quantity: row.quantityToAdd, reservedQuantity: 0, reorderLevel: row.reorderLevel },
+        update: { reorderLevel: row.reorderLevel, ...(row.quantityToAdd > 0 ? { quantity: { increment: row.quantityToAdd } } : {}) },
       });
+      if (row.quantityToAdd > 0) {
+        await transaction.inventoryMovement.create({ data: {
+          productId: product.id, movementType: "STOCK_IN", quantityChange: row.quantityToAdd,
+          balanceAfter: inventory.quantity, referenceType: "EXCEL_PRODUCT_IMPORT",
+          createdById: req.user.id, notes: `Opening stock added from Excel row ${row.rowNumber}`,
+        } });
+      }
     }
-    const result = { created: plan.creates, updated: plan.updates, categoriesCreated: plan.categoriesToCreate.length, total: plan.parsedRows.length };
+    const result = { created: plan.creates, updated: plan.updates, unitsAdded: plan.unitsToAdd, categoriesCreated: plan.categoriesToCreate.length, total: plan.parsedRows.length };
     await transaction.auditLog.create({ data: { userId: req.user.id, action: "IMPORT_PRODUCT_CATALOGUE", entityType: "PRODUCT", details: result } });
     return result;
   }, { timeout: 30000 });
@@ -356,18 +371,20 @@ async function downloadProductImportTemplate(req, res) {
     { header: "Width (cm)", key: "width", width: 14 }, { header: "Thickness (cm)", key: "thickness", width: 16 },
     { header: "Category", key: "category", width: 20 }, { header: "Selling Price (ETB)", key: "sellingPrice", width: 19 },
     { header: "Cost Price (ETB)", key: "costPrice", width: 17 }, { header: "Reorder Level", key: "reorderLevel", width: 15 },
-    { header: "Description", key: "description", width: 34 }, { header: "Active", key: "active", width: 12 },
+    { header: "Quantity to Add", key: "quantity", width: 17 }, { header: "Description", key: "description", width: 34 },
+    { header: "Active", key: "active", width: 12 },
   ];
-  sheet.addRow({ name: "603", length: 220, width: 34, thickness: 3, category: "Granite", sellingPrice: 0, costPrice: 0, reorderLevel: 5, description: "Replace this example with a real product", active: "Yes" });
+  sheet.addRow({ name: "603", length: 220, width: 34, thickness: 3, category: "Granite", sellingPrice: 0, costPrice: 0, reorderLevel: 5, quantity: 24, description: "Replace this example with a real product", active: "Yes" });
   sheet.getRow(1).eachCell((cell) => { cell.font = { bold: true, color: { argb: "FFFFFFFF" } }; cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF111111" } }; cell.alignment = { vertical: "middle" }; });
   sheet.getRow(1).height = 26;
-  sheet.autoFilter = { from: "A1", to: "J2" };
+  sheet.autoFilter = { from: "A1", to: "K2" };
   sheet.getColumn(6).numFmt = '#,##0.00 "ETB"';
   sheet.getColumn(7).numFmt = '#,##0.00 "ETB"';
-  sheet.getColumn(10).eachCell({ includeEmpty: true }, (cell, rowNumber) => { if (rowNumber > 1) cell.dataValidation = { type: "list", allowBlank: true, formulae: ['"Yes,No"'] }; });
+  sheet.getColumn(9).numFmt = "0";
+  sheet.getColumn(11).eachCell({ includeEmpty: true }, (cell, rowNumber) => { if (rowNumber > 1) cell.dataValidation = { type: "list", allowBlank: true, formulae: ['"Yes,No"'] }; });
   const instructions = workbook.addWorksheet("Instructions");
   instructions.columns = [{ width: 110 }];
-  ["STOCKFLOW PRODUCT IMPORT", "Keep the header row unchanged. Add one product measurement per row.", "Length, width, and thickness must match an approved StockFlow measurement.", "Existing products with the same name and measurement are updated; new ones are created with zero stock.", "Categories that do not yet exist are created automatically. Inventory quantities are never imported from this file."].forEach((text, index) => instructions.addRow([text]));
+  ["STOCKFLOW PRODUCT IMPORT", "Keep the header row unchanged. Add one product measurement per row.", "Length, width, and thickness must match an approved StockFlow measurement.", "Quantity to Add is optional. Enter a whole number to add that stock to the current balance; use 0 or leave it blank to make no stock change.", "Existing products with the same name and measurement are updated. Re-importing a positive quantity adds it again, so always preview before confirming.", "Categories that do not yet exist are created automatically."].forEach((text) => instructions.addRow([text]));
   instructions.getCell("A1").font = { bold: true, size: 16 };
   instructions.getColumn(1).alignment = { wrapText: true, vertical: "top" };
   const buffer = await workbook.xlsx.writeBuffer();
