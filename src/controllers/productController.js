@@ -1,4 +1,5 @@
 const prisma = require("../config/prisma");
+const ExcelJS = require("exceljs");
 const {
   normalizeMoney,
   normalizeOptionalText,
@@ -157,6 +158,222 @@ function validateProductInput(body, partial = false) {
   }
 
   return { data, reorderLevel, errors };
+}
+
+function cellText(cell) {
+  const value = cell?.value;
+  if (value === null || value === undefined) return "";
+  if (typeof value === "object") {
+    if (value.result !== undefined) return String(value.result).trim();
+    if (Array.isArray(value.richText)) return value.richText.map((part) => part.text).join("").trim();
+    if (value.text !== undefined) return String(value.text).trim();
+  }
+  return String(value).trim();
+}
+
+function normalizeImportHeader(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+const IMPORT_HEADERS = {
+  name: ["product name", "product", "name", "item name"],
+  length: ["length", "length cm", "length centimetres", "length centimeters"],
+  width: ["width", "width cm", "width centimetres", "width centimeters"],
+  thickness: ["thickness", "thickness cm", "thickness centimetres", "thickness centimeters"],
+  measurement: ["measurement", "measurement l w t", "size"],
+  category: ["category", "category name"],
+  sellingPrice: ["selling price", "selling price etb", "price", "sale price"],
+  costPrice: ["cost price", "cost price etb", "cost", "unit cost"],
+  reorderLevel: ["reorder level", "reorder", "minimum stock"],
+  description: ["description", "notes"],
+  isActive: ["active", "is active", "status"],
+};
+
+function findImportColumn(headerMap, field) {
+  return IMPORT_HEADERS[field].map((alias) => headerMap.get(alias)).find(Boolean);
+}
+
+function parseImportBoolean(value, rowNumber, errors) {
+  const normalized = String(value || "yes").trim().toLowerCase();
+  if (["yes", "y", "true", "1", "active"].includes(normalized)) return true;
+  if (["no", "n", "false", "0", "inactive"].includes(normalized)) return false;
+  errors.push(`Row ${rowNumber}: Active must be Yes or No`);
+  return true;
+}
+
+async function parseProductWorkbook(buffer) {
+  const workbook = new ExcelJS.Workbook();
+  try {
+    await workbook.xlsx.load(buffer);
+  } catch {
+    return { rows: [], errors: ["The file is not a readable .xlsx workbook"] };
+  }
+  const worksheet = workbook.worksheets[0];
+  if (!worksheet) return { rows: [], errors: ["The workbook does not contain a worksheet"] };
+
+  const headerMap = new Map();
+  worksheet.getRow(1).eachCell((cell, column) => headerMap.set(normalizeImportHeader(cellText(cell)), column));
+  const columns = Object.fromEntries(Object.keys(IMPORT_HEADERS).map((field) => [field, findImportColumn(headerMap, field)]));
+  const errors = [];
+  if (!columns.name) errors.push("The first row needs a Product Name column");
+  if ((!columns.length || !columns.width || !columns.thickness) && !columns.measurement) {
+    errors.push("Add Length, Width, and Thickness columns, or one Measurement column");
+  }
+  if (errors.length) return { rows: [], errors };
+
+  const rows = [];
+  const seenSkus = new Map();
+  const lastRow = Math.min(worksheet.actualRowCount, 2001);
+  for (let rowNumber = 2; rowNumber <= lastRow; rowNumber += 1) {
+    const row = worksheet.getRow(rowNumber);
+    const name = cellText(row.getCell(columns.name));
+    const measurementText = columns.measurement ? cellText(row.getCell(columns.measurement)) : "";
+    const rawValues = [name, measurementText, columns.length && cellText(row.getCell(columns.length)), columns.width && cellText(row.getCell(columns.width)), columns.thickness && cellText(row.getCell(columns.thickness))];
+    if (rawValues.every((value) => !value)) continue;
+
+    let length = columns.length ? cellText(row.getCell(columns.length)) : "";
+    let width = columns.width ? cellText(row.getCell(columns.width)) : "";
+    let thickness = columns.thickness ? cellText(row.getCell(columns.thickness)) : "";
+    if (measurementText) {
+      const parts = measurementText.toLowerCase().replace(/\s/g, "").split(/[x×*]/);
+      if (parts.length === 3) [length, width, thickness] = parts;
+      else errors.push(`Row ${rowNumber}: Measurement must look like 220 x 34 x 3`);
+    }
+    const category = columns.category ? cellText(row.getCell(columns.category)).replace(/\s+/g, " ") : "";
+    const input = {
+      name,
+      length,
+      width,
+      thickness,
+      sellingPrice: columns.sellingPrice ? cellText(row.getCell(columns.sellingPrice)) || "0" : "0",
+      costPrice: columns.costPrice ? cellText(row.getCell(columns.costPrice)) : "",
+      reorderLevel: columns.reorderLevel ? cellText(row.getCell(columns.reorderLevel)) || "5" : "5",
+      description: columns.description ? cellText(row.getCell(columns.description)) : "",
+      isActive: parseImportBoolean(columns.isActive ? cellText(row.getCell(columns.isActive)) : "yes", rowNumber, errors),
+    };
+    const validated = validateProductInput(input);
+    errors.push(...validated.errors.map((error) => `Row ${rowNumber}: ${error}`));
+    if (category.length > 120) errors.push(`Row ${rowNumber}: Category cannot exceed 120 characters`);
+    if (category && category.length < 2) errors.push(`Row ${rowNumber}: Category must be at least 2 characters`);
+    if (validated.errors.length || (category && (category.length < 2 || category.length > 120))) continue;
+
+    const sku = makeInternalSku(validated.data.name, validated.data.length, validated.data.width, validated.data.thickness);
+    if (seenSkus.has(sku)) {
+      errors.push(`Row ${rowNumber}: duplicates row ${seenSkus.get(sku)} (${validated.data.name} ${measurementKey(validated.data.length, validated.data.width, validated.data.thickness)})`);
+      continue;
+    }
+    seenSkus.set(sku, rowNumber);
+    rows.push({ rowNumber, sku, category: category || null, data: validated.data, reorderLevel: validated.reorderLevel });
+  }
+  if (worksheet.actualRowCount > 2001) errors.push("The workbook exceeds the 2,000 product row limit");
+  if (!rows.length && !errors.length) errors.push("The workbook does not contain any product rows");
+  return { rows, errors };
+}
+
+async function productImportPlan(buffer, role) {
+  const parsed = await parseProductWorkbook(buffer);
+  if (parsed.errors.length) return { ...parsed, creates: 0, updates: 0, categoriesToCreate: [] };
+  const [existingProducts, existingCategories] = await Promise.all([
+    prisma.product.findMany({ where: { sku: { in: parsed.rows.map((row) => row.sku) } }, select: { sku: true } }),
+    prisma.category.findMany({ select: { name: true } }),
+  ]);
+  const existingSkus = new Set(existingProducts.map((product) => product.sku));
+  const categoryNames = new Set(existingCategories.map((category) => category.name.toLowerCase()));
+  const categoriesToCreate = [...new Set(parsed.rows.map((row) => row.category).filter(Boolean))].filter((name) => !categoryNames.has(name.toLowerCase()));
+  return {
+    ...parsed,
+    rows: parsed.rows.map((row) => ({
+      rowNumber: row.rowNumber,
+      sku: row.sku,
+      name: row.data.name,
+      measurement: measurementKey(row.data.length, row.data.width, row.data.thickness),
+      category: row.category,
+      sellingPrice: row.data.sellingPrice,
+      action: existingSkus.has(row.sku) ? "UPDATE" : "CREATE",
+    })),
+    creates: parsed.rows.filter((row) => !existingSkus.has(row.sku)).length,
+    updates: parsed.rows.filter((row) => existingSkus.has(row.sku)).length,
+    categoriesToCreate,
+    parsedRows: parsed.rows,
+  };
+}
+
+async function previewProductImport(req, res) {
+  const plan = await productImportPlan(req.body, req.user.role);
+  return res.status(plan.errors.length ? 400 : 200).json({
+    success: plan.errors.length === 0,
+    message: plan.errors.length ? "Fix the workbook errors before importing" : "Workbook validated and ready to import",
+    errors: plan.errors,
+    data: { preview: { rows: plan.rows, creates: plan.creates, updates: plan.updates, categoriesToCreate: plan.categoriesToCreate } },
+  });
+}
+
+async function importProducts(req, res) {
+  const plan = await productImportPlan(req.body, req.user.role);
+  if (plan.errors.length) return res.status(400).json({ success: false, message: "Fix the workbook errors before importing", errors: plan.errors });
+  const counts = await prisma.$transaction(async (transaction) => {
+    const categoryRows = await transaction.category.findMany();
+    const categoryByName = new Map(categoryRows.map((category) => [category.name.toLowerCase(), category]));
+    for (const name of plan.categoriesToCreate) {
+      const created = await transaction.category.create({ data: { name } });
+      categoryByName.set(name.toLowerCase(), created);
+    }
+    for (const category of categoryRows.filter((entry) => !entry.isActive && plan.parsedRows.some((row) => row.category?.toLowerCase() === entry.name.toLowerCase()))) {
+      const restored = await transaction.category.update({ where: { id: category.id }, data: { isActive: true } });
+      categoryByName.set(restored.name.toLowerCase(), restored);
+    }
+    for (const row of plan.parsedRows) {
+      const existing = await transaction.product.findUnique({ where: { sku: row.sku } });
+      const productData = {
+        ...row.data,
+        sku: row.sku,
+        sellingPrice: row.data.sellingPrice,
+        categoryId: row.category ? categoryByName.get(row.category.toLowerCase()).id : null,
+      };
+      const product = existing
+        ? await transaction.product.update({ where: { id: existing.id }, data: productData })
+        : await transaction.product.create({ data: productData });
+      await transaction.inventory.upsert({
+        where: { productId: product.id },
+        create: { productId: product.id, quantity: 0, reservedQuantity: 0, reorderLevel: row.reorderLevel },
+        update: { reorderLevel: row.reorderLevel },
+      });
+    }
+    const result = { created: plan.creates, updated: plan.updates, categoriesCreated: plan.categoriesToCreate.length, total: plan.parsedRows.length };
+    await transaction.auditLog.create({ data: { userId: req.user.id, action: "IMPORT_PRODUCT_CATALOGUE", entityType: "PRODUCT", details: result } });
+    return result;
+  }, { timeout: 30000 });
+  return res.status(201).json({ success: true, message: `${counts.total} products imported from Excel`, data: { counts } });
+}
+
+async function downloadProductImportTemplate(req, res) {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "StockFlow";
+  workbook.created = new Date();
+  const sheet = workbook.addWorksheet("Products", { views: [{ state: "frozen", ySplit: 1 }] });
+  sheet.columns = [
+    { header: "Product Name", key: "name", width: 24 }, { header: "Length (cm)", key: "length", width: 14 },
+    { header: "Width (cm)", key: "width", width: 14 }, { header: "Thickness (cm)", key: "thickness", width: 16 },
+    { header: "Category", key: "category", width: 20 }, { header: "Selling Price (ETB)", key: "sellingPrice", width: 19 },
+    { header: "Cost Price (ETB)", key: "costPrice", width: 17 }, { header: "Reorder Level", key: "reorderLevel", width: 15 },
+    { header: "Description", key: "description", width: 34 }, { header: "Active", key: "active", width: 12 },
+  ];
+  sheet.addRow({ name: "603", length: 220, width: 34, thickness: 3, category: "Granite", sellingPrice: 0, costPrice: 0, reorderLevel: 5, description: "Replace this example with a real product", active: "Yes" });
+  sheet.getRow(1).eachCell((cell) => { cell.font = { bold: true, color: { argb: "FFFFFFFF" } }; cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF111111" } }; cell.alignment = { vertical: "middle" }; });
+  sheet.getRow(1).height = 26;
+  sheet.autoFilter = { from: "A1", to: "J2" };
+  sheet.getColumn(6).numFmt = '#,##0.00 "ETB"';
+  sheet.getColumn(7).numFmt = '#,##0.00 "ETB"';
+  sheet.getColumn(10).eachCell({ includeEmpty: true }, (cell, rowNumber) => { if (rowNumber > 1) cell.dataValidation = { type: "list", allowBlank: true, formulae: ['"Yes,No"'] }; });
+  const instructions = workbook.addWorksheet("Instructions");
+  instructions.columns = [{ width: 110 }];
+  ["STOCKFLOW PRODUCT IMPORT", "Keep the header row unchanged. Add one product measurement per row.", "Length, width, and thickness must match an approved StockFlow measurement.", "Existing products with the same name and measurement are updated; new ones are created with zero stock.", "Categories that do not yet exist are created automatically. Inventory quantities are never imported from this file."].forEach((text, index) => instructions.addRow([text]));
+  instructions.getCell("A1").font = { bold: true, size: 16 };
+  instructions.getColumn(1).alignment = { wrapText: true, vertical: "top" };
+  const buffer = await workbook.xlsx.writeBuffer();
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", 'attachment; filename="stockflow-product-import-template.xlsx"');
+  return res.send(Buffer.from(buffer));
 }
 
 async function createProduct(req, res) {
@@ -494,4 +711,10 @@ module.exports = {
   getProduct,
   updateProduct,
   deleteProduct,
+  previewProductImport,
+  importProducts,
+  downloadProductImportTemplate,
+  parseProductWorkbook,
+  productImportPlan,
+  validateProductInput,
 };

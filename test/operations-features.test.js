@@ -13,6 +13,9 @@ const { calculateDiscountCents } = require("../src/utils/discounts");
 const { centsToMoney } = require("../src/utils/money");
 const { sendCsv, parseDate } = require("../src/controllers/exportController");
 const { buildProfessionalWorkbook } = require("../src/utils/professionalWorkbook");
+const ExcelJS = require("exceljs");
+const { parseProductWorkbook } = require("../src/controllers/productController");
+const { allocateTransferBatches, normalizeTransfer } = require("../src/controllers/inventoryController");
 const {
   validateSaleRequest,
   sumQuantityByProduct,
@@ -345,4 +348,29 @@ test("non-cash payments retain their recipient account for dashboards and export
   assert.match(schema, /recipientAccount\s+String\?/);
   assert.match(exportController, /title: "Recipient Account"/);
   assert.match(exportController, /title: "Payment Destination"/);
+});
+
+test("Excel catalogue import reads product dimensions without importing stock", async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("Products");
+  sheet.addRow(["Product Name", "Length (cm)", "Width (cm)", "Thickness (cm)", "Category", "Selling Price (ETB)", "Reorder Level"]);
+  sheet.addRow(["603", 220, 34, 3, "Granite", 2500, 7]);
+  const result = await parseProductWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()));
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].sku, "603-220-34-3");
+  assert.equal(result.rows[0].reorderLevel, 7);
+  assert.equal(Object.hasOwn(result.rows[0].data, "quantity"), false);
+});
+
+test("warehouse transfer allocates oldest batches and detects duplicate product lines", () => {
+  const batches = [
+    { id: 1, availableQuantity: 2, createdAt: new Date("2026-01-01") },
+    { id: 2, availableQuantity: 5, createdAt: new Date("2026-02-01") },
+  ];
+  const allocation = allocateTransferBatches(4, batches);
+  assert.deepEqual(allocation.allocations.map(({ batch, quantity }) => [batch.id, quantity]), [[1, 2], [2, 2]]);
+  assert.equal(allocation.unbatchedQuantity, 0);
+  const duplicate = normalizeTransfer({ fromLocationId: 1, toLocationId: 2, items: [{ productId: 7, quantity: 1 }, { productId: 7, quantity: 1, batchId: 3 }] });
+  assert.match(duplicate.errors.join(" "), /repeats a product/);
 });

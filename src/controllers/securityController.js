@@ -1,4 +1,5 @@
 const prisma = require("../config/prisma");
+const bcrypt = require("bcrypt");
 const { encryptJsonBackup } = require("../utils/backupEncryption");
 const { generateSecret, verifyCode, provisioningUri } = require("../utils/totp");
 const { instanceIdentity } = require("../utils/instanceIdentity");
@@ -264,4 +265,55 @@ async function createEncryptedBackup(req, res) {
   return res.send(JSON.stringify(encryptedBackup, null, 2));
 }
 
-module.exports = { getSecurityStatus, createEncryptedBackup, startTwoFactorSetup, verifyTwoFactorSetup, disableTwoFactor };
+async function getHandoverResetPreview(req, res) {
+  const [sales, payments, releases, returns, physicalUnits, reservedUnits, activeBatches] = await Promise.all([
+    prisma.sale.count(), prisma.payment.count(), prisma.inventoryRelease.count(), prisma.saleReturn.count(),
+    prisma.inventory.aggregate({ _sum: { quantity: true } }), prisma.inventory.aggregate({ _sum: { reservedQuantity: true } }),
+    prisma.stockBatch.count({ where: { availableQuantity: { gt: 0 } } }),
+  ]);
+  return res.json({ success: true, data: { sales, payments, releases, returns, physicalUnits: physicalUnits._sum.quantity || 0, reservedUnits: reservedUnits._sum.reservedQuantity || 0, activeBatches } });
+}
+
+async function resetSalesAndInventory(req, res) {
+  const confirmation = String(req.body.confirmation || "").trim();
+  const password = String(req.body.password || "");
+  if (confirmation !== "RESET SALES AND INVENTORY") {
+    return res.status(400).json({ success: false, message: "Type RESET SALES AND INVENTORY exactly to confirm" });
+  }
+  const administrator = await prisma.user.findUnique({ where: { id: req.user.id }, select: { passwordHash: true } });
+  if (!administrator || !(await bcrypt.compare(password, administrator.passwordHash))) {
+    return res.status(403).json({ success: false, message: "Administrator password is incorrect" });
+  }
+
+  const result = await prisma.$transaction(async (transaction) => {
+    const counts = {
+      sales: await transaction.sale.count(),
+      payments: await transaction.payment.count(),
+      releases: await transaction.inventoryRelease.count(),
+      returns: await transaction.saleReturn.count(),
+      productsPreserved: await transaction.product.count(),
+      categoriesPreserved: await transaction.category.count(),
+    };
+    await transaction.deliveryProof.deleteMany();
+    await transaction.inventoryReleaseItem.deleteMany();
+    await transaction.saleReturnItem.deleteMany();
+    await transaction.payment.deleteMany();
+    await transaction.inventoryRelease.deleteMany();
+    await transaction.saleReturn.deleteMany();
+    await transaction.notification.deleteMany({ where: { saleId: { not: null } } });
+    await transaction.inventoryMovement.deleteMany({ where: { referenceType: { in: ["INVENTORY_RELEASE", "SALE_RETURN"] } } });
+    await transaction.auditLog.deleteMany({ where: { OR: [{ entityType: { in: ["SALE", "SALE_RETURN", "INVENTORY_RELEASE"] } }, { action: { in: ["CREATE_SALE", "UPDATE_SALE", "CANCEL_SALE", "COLLECT_CREDIT_PAYMENT", "RETURN_SALE", "RELEASE_INVENTORY", "CONFIRM_DELIVERY"] } }] } });
+    await transaction.saleItem.deleteMany();
+    await transaction.sale.deleteMany();
+    await transaction.shift.deleteMany();
+    await transaction.inventory.updateMany({ data: { quantity: 0, reservedQuantity: 0 } });
+    await transaction.inventoryLocationBalance.updateMany({ data: { quantity: 0 } });
+    await transaction.stockBatch.updateMany({ data: { availableQuantity: 0 } });
+    await transaction.discount.updateMany({ data: { usageCount: 0 } });
+    await transaction.auditLog.create({ data: { userId: req.user.id, action: "HANDOVER_RESET_SALES_AND_INVENTORY", entityType: "SYSTEM", details: counts } });
+    return counts;
+  }, { isolationLevel: "Serializable", timeout: 30000 });
+  return res.json({ success: true, message: "Sales history and current inventory were cleared. The product catalogue was preserved.", data: { result } });
+}
+
+module.exports = { getSecurityStatus, createEncryptedBackup, startTwoFactorSetup, verifyTwoFactorSetup, disableTwoFactor, getHandoverResetPreview, resetSalesAndInventory };

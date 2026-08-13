@@ -5,6 +5,8 @@ const {
   startTwoFactorSetup,
   verifyTwoFactorSetup,
   disableTwoFactor,
+  getHandoverResetPreview,
+  resetSalesAndInventory,
 } = require("../controllers/securityController");
 const { authenticate, authorizeRoles } = require("../middleware/auth");
 
@@ -20,5 +22,7 @@ router.post(
   authorizeRoles("ADMIN"),
   createEncryptedBackup
 );
+router.get("/handover-reset", authorizeRoles("ADMIN"), getHandoverResetPreview);
+router.post("/handover-reset", authorizeRoles("ADMIN"), resetSalesAndInventory);
 
 module.exports = router;
