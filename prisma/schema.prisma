@@ -128,6 +128,7 @@ model User {
   twoFactorEnabled     Boolean             @default(false) @map("two_factor_enabled")
   isPlatformOwner      Boolean             @default(false) @map("is_platform_owner")
   tenantsCreated       SaasTenant[]        @relation("SaasTenantCreatedBy")
+  subscriptionPayments TenantSubscriptionPayment[] @relation("SubscriptionPaymentsRecorded")
 
   @@map("users")
 }
@@ -163,6 +164,11 @@ model SaasTenant {
   backendUrl          String?                @unique @map("backend_url") @db.VarChar(500)
   provisioningStartedAt DateTime?           @map("provisioning_started_at") @db.Timestamptz(3)
   provisioningCompletedAt DateTime?         @map("provisioning_completed_at") @db.Timestamptz(3)
+  monthlyPriceMinor   Int                    @default(1000000) @map("monthly_price_minor")
+  subscriptionCurrency String                @default("ETB") @map("subscription_currency") @db.VarChar(3)
+  subscriptionEndsAt DateTime?               @map("subscription_ends_at") @db.Timestamptz(3)
+  lastSubscriptionPaymentAt DateTime?        @map("last_subscription_payment_at") @db.Timestamptz(3)
+  subscriptionExempt Boolean                 @default(false) @map("subscription_exempt")
   notes               String?
   createdById         Int?                   @map("created_by_id")
   activatedAt         DateTime?              @map("activated_at") @db.Timestamptz(3)
@@ -170,10 +176,28 @@ model SaasTenant {
   updatedAt           DateTime               @updatedAt @map("updated_at") @db.Timestamptz(3)
   createdBy           User?                  @relation("SaasTenantCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   errorAggregates     TenantErrorAggregate[]
+  subscriptionPayments TenantSubscriptionPayment[]
 
   @@index([status, createdAt])
   @@index([createdById])
   @@map("saas_tenants")
+}
+
+model TenantSubscriptionPayment {
+  id            Int        @id @default(autoincrement())
+  tenantId      String     @map("tenant_id") @db.Uuid
+  amountMinor   Int        @map("amount_minor")
+  currency      String     @default("ETB") @db.VarChar(3)
+  coveredFrom   DateTime   @map("covered_from") @db.Timestamptz(3)
+  coveredUntil  DateTime   @map("covered_until") @db.Timestamptz(3)
+  recordedById  Int        @map("recorded_by_id")
+  paidAt        DateTime   @default(now()) @map("paid_at") @db.Timestamptz(3)
+  tenant        SaasTenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  recordedBy    User       @relation("SubscriptionPaymentsRecorded", fields: [recordedById], references: [id], onDelete: Restrict)
+
+  @@index([tenantId, paidAt])
+  @@index([paidAt])
+  @@map("tenant_subscription_payments")
 }
 
 model TenantErrorAggregate {

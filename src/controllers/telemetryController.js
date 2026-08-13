@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const prisma = require("../config/prisma");
+const { subscriptionAccess } = require("../utils/subscriptions");
 
 const requests = new Map();
 const HEX_64 = /^[a-f0-9]{64}$/;
@@ -66,7 +67,7 @@ async function heartbeat(req, res) {
       lastMemoryMb: Math.max(0, Math.min(Number(req.body.memoryMb) || 0, 2_147_483_647)),
     },
   });
-  return res.json({ success: true });
+  return res.json({ success: true, data: { subscription: subscriptionAccess(tenant) } });
 }
 
 async function reportError(req, res) {

@@ -2,6 +2,7 @@ const prisma = require("../config/prisma");
 const crypto = require("crypto");
 const { instanceIdentity, SLUG_PATTERN } = require("../utils/instanceIdentity");
 const { renderConfig, createDatabase, getDatabase, getDatabaseConnection, createBackendService, getService, getDeploy, customerWorkspaceUrl, ProvisioningError } = require("../utils/renderProvisioning");
+const { DEFAULT_MONTHLY_PRICE_MINOR, addCalendarMonth, subscriptionState } = require("../utils/subscriptions");
 
 const PLANS = new Set(["STARTER", "GROWTH", "ENTERPRISE"]);
 const STATUSES = new Set(["PROVISIONING", "ACTIVE", "SUSPENDED", "ARCHIVED"]);
@@ -52,7 +53,7 @@ function provisioningConfig(tenant, monitoringToken, publicControlPlaneUrl) {
 
 function serializeTenant(tenant) {
   const { monitoringTokenHash, ...safeTenant } = tenant;
-  return { ...safeTenant, monitoringConfigured: Boolean(monitoringTokenHash), provisioningConfig: provisioningConfig(tenant) };
+  return { ...safeTenant, subscription: subscriptionState(tenant), monitoringConfigured: Boolean(monitoringTokenHash), provisioningConfig: provisioningConfig(tenant) };
 }
 
 function automationCapability() {
@@ -74,6 +75,7 @@ async function ensureCurrentTenant() {
       provisioningStatus: "COMPLETED",
       provisioningStep: "READY",
       provisioningCompletedAt: new Date(),
+      subscriptionExempt: true,
     },
     create: {
       companyName: instanceIdentity.companyName,
@@ -90,6 +92,7 @@ async function ensureCurrentTenant() {
       provisioningStatus: "COMPLETED",
       provisioningStep: "READY",
       provisioningCompletedAt: new Date(),
+      subscriptionExempt: true,
       activatedAt: new Date(),
     },
   });
@@ -97,19 +100,37 @@ async function ensureCurrentTenant() {
 
 async function listTenants(req, res) {
   await ensureCurrentTenant();
-  const tenants = await prisma.saasTenant.findMany({
-    include: { createdBy: { select: { id: true, fullName: true, username: true } } },
-    orderBy: [{ status: "asc" }, { companyName: "asc" }],
-  });
-  return res.json({ success: true, data: { tenants: tenants.map(serializeTenant), automation: automationCapability() } });
+  const now = new Date();
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const [tenants, currentMonth, lifetime, recentPayments] = await Promise.all([
+    prisma.saasTenant.findMany({ include: { createdBy: { select: { id: true, fullName: true, username: true } } }, orderBy: [{ status: "asc" }, { companyName: "asc" }] }),
+    prisma.tenantSubscriptionPayment.aggregate({ where: { paidAt: { gte: monthStart } }, _sum: { amountMinor: true } }),
+    prisma.tenantSubscriptionPayment.aggregate({ _sum: { amountMinor: true } }),
+    prisma.tenantSubscriptionPayment.findMany({ include: { tenant: { select: { companyName: true, slug: true } } }, orderBy: { paidAt: "desc" }, take: 8 }),
+  ]);
+  const billable = tenants.filter((tenant) => !tenant.subscriptionExempt && tenant.provisioningStatus === "COMPLETED");
+  const active = billable.filter((tenant) => subscriptionState(tenant, now).allowed);
+  const subscriptions = {
+    currency: "ETB",
+    defaultMonthlyPriceMinor: DEFAULT_MONTHLY_PRICE_MINOR,
+    activeCustomers: active.length,
+    dueCustomers: billable.length - active.length,
+    mrrMinor: active.reduce((sum, tenant) => sum + tenant.monthlyPriceMinor, 0),
+    collectedThisMonthMinor: currentMonth._sum.amountMinor || 0,
+    lifetimeRevenueMinor: lifetime._sum.amountMinor || 0,
+    recentPayments,
+  };
+  return res.json({ success: true, data: { tenants: tenants.map(serializeTenant), automation: automationCapability(), subscriptions } });
 }
 
 async function resolveTenant(req, res) {
   const slug = clean(req.params.slug, 80).toLowerCase();
   if (!SLUG_PATTERN.test(slug)) return res.status(404).json({ success: false, message: "Customer workspace not found" });
-  const tenant = await prisma.saasTenant.findFirst({ where: { slug, status: "ACTIVE", provisioningStatus: "COMPLETED", backendUrl: { not: null } }, select: { companyName: true, slug: true, backendUrl: true } });
+  const tenant = await prisma.saasTenant.findFirst({ where: { slug, status: "ACTIVE", provisioningStatus: "COMPLETED", backendUrl: { not: null } }, select: { companyName: true, slug: true, backendUrl: true, subscriptionEndsAt: true, subscriptionExempt: true, status: true } });
   if (!tenant) return res.status(404).json({ success: false, message: "Customer workspace is not active" });
-  return res.json({ success: true, data: tenant });
+  const subscription = subscriptionState(tenant);
+  if (!subscription.allowed) return res.status(402).json({ success: false, message: "This StockFlow subscription is paused. Contact Ben IT Solutions to renew access.", data: { subscription } });
+  return res.json({ success: true, data: { companyName: tenant.companyName, slug: tenant.slug, backendUrl: tenant.backendUrl, subscription } });
 }
 
 function provisioningControlPlaneUrl(req) {
@@ -278,6 +299,44 @@ async function updateTenant(req, res) {
   }
 }
 
+async function renewSubscription(req, res) {
+  const id = String(req.params.id || "");
+  const months = Number(req.body.months || 1);
+  const confirmation = String(req.body.confirmation || "");
+  if (!Number.isInteger(months) || months < 1 || months > 12) return res.status(400).json({ success: false, message: "Choose between 1 and 12 months" });
+  const existing = await prisma.saasTenant.findUnique({ where: { id } });
+  if (!existing) return res.status(404).json({ success: false, message: "Customer workspace not found" });
+  if (existing.subscriptionExempt) return res.status(400).json({ success: false, message: "This workspace does not require a subscription" });
+  if (confirmation !== existing.companyName) return res.status(400).json({ success: false, message: `Type ${existing.companyName} exactly to confirm payment was received` });
+  if (existing.provisioningStatus !== "COMPLETED") return res.status(409).json({ success: false, message: "Finish creating the customer system before enabling its subscription" });
+
+  const now = new Date();
+  const coveredFrom = existing.subscriptionEndsAt && existing.subscriptionEndsAt > now ? existing.subscriptionEndsAt : now;
+  let coveredUntil = coveredFrom;
+  for (let index = 0; index < months; index += 1) coveredUntil = addCalendarMonth(coveredUntil);
+  const amountMinor = existing.monthlyPriceMinor * months;
+  const tenant = await prisma.$transaction(async (transaction) => {
+    await transaction.tenantSubscriptionPayment.create({ data: { tenantId: id, amountMinor, currency: existing.subscriptionCurrency, coveredFrom, coveredUntil, recordedById: req.user.id } });
+    const updated = await transaction.saasTenant.update({ where: { id }, data: { status: "ACTIVE", subscriptionEndsAt: coveredUntil, lastSubscriptionPaymentAt: now } });
+    await transaction.auditLog.create({ data: { userId: req.user.id, action: "RENEW_TENANT_SUBSCRIPTION", entityType: "SAAS_TENANT", details: { tenantId: id, months, amountMinor, currency: existing.subscriptionCurrency, coveredUntil: coveredUntil.toISOString() } } });
+    return updated;
+  });
+  return res.json({ success: true, message: `${existing.companyName} is enabled through ${coveredUntil.toLocaleDateString("en-GB")}.`, data: { tenant: serializeTenant(tenant) } });
+}
+
+async function updateSubscriptionPrice(req, res) {
+  const id = String(req.params.id || "");
+  const monthlyPrice = Number(req.body.monthlyPrice);
+  if (!Number.isFinite(monthlyPrice) || monthlyPrice < 0 || monthlyPrice > 100_000_000) return res.status(400).json({ success: false, message: "Enter a valid monthly price" });
+  const tenant = await prisma.saasTenant.update({ where: { id }, data: { monthlyPriceMinor: Math.round(monthlyPrice * 100) } }).catch((error) => {
+    if (error.code === "P2025") return null;
+    throw error;
+  });
+  if (!tenant) return res.status(404).json({ success: false, message: "Customer workspace not found" });
+  await prisma.auditLog.create({ data: { userId: req.user.id, action: "UPDATE_TENANT_SUBSCRIPTION_PRICE", entityType: "SAAS_TENANT", details: { tenantId: id, monthlyPriceMinor: tenant.monthlyPriceMinor, currency: tenant.subscriptionCurrency } } });
+  return res.json({ success: true, message: "Monthly subscription price updated", data: { tenant: serializeTenant(tenant) } });
+}
+
 function operationalHealth(tenant, now = Date.now()) {
   if (["SUSPENDED", "ARCHIVED"].includes(tenant.status)) return "PAUSED";
   if (!tenant.lastHeartbeatAt) return "NOT_CONNECTED";
@@ -335,4 +394,4 @@ async function resolveIncident(req, res) {
   return res.json({ success: true, message: "Incident marked resolved" });
 }
 
-module.exports = { listTenants, resolveTenant, createTenant, updateTenant, provisionTenant, operationsOverview, rotateMonitoringToken, resolveIncident, provisioningConfig, serializeTenant, operationalHealth, automationCapability };
+module.exports = { listTenants, resolveTenant, createTenant, updateTenant, renewSubscription, updateSubscriptionPrice, provisionTenant, operationsOverview, rotateMonitoringToken, resolveIncident, provisioningConfig, serializeTenant, operationalHealth, automationCapability };

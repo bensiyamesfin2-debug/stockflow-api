@@ -29,7 +29,7 @@ const tenantRoutes = require("./routes/tenantRoutes");
 const telemetryRoutes = require("./routes/telemetryRoutes");
 const { authenticate, authorizeRoles } = require("./middleware/auth");
 const { instanceIdentity, publicInstanceIdentity } = require("./utils/instanceIdentity");
-const { reportInstanceError } = require("./utils/telemetryReporter");
+const { reportInstanceError, enforceSubscription } = require("./utils/telemetryReporter");
 
 const app = express();
 
@@ -128,6 +128,8 @@ app.get("/api/health", async (req, res) => {
 app.get("/api/instance", (req, res) => {
   return res.json({ success: true, data: { instance: publicInstanceIdentity() } });
 });
+
+app.use(enforceSubscription);
 
 app.use("/api/auth", authRoutes);
 app.use("/api/categories", categoryRoutes);

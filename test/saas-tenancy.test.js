@@ -4,6 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 const { readInstanceIdentity } = require("../src/utils/instanceIdentity");
 const { renderConfig, customerWorkspaceUrl } = require("../src/utils/renderProvisioning");
+const { addCalendarMonth, subscriptionState, subscriptionAccess } = require("../src/utils/subscriptions");
 
 function source(relativePath) {
   return fs.readFileSync(path.join(__dirname, "..", relativePath), "utf8");
@@ -85,4 +86,26 @@ test("automated tenant provisioning is explicit, isolated, resumable, and secret
   assert.match(routes, /\/:id\/provision/);
   assert.match(controller, /connection\.internalConnectionString/);
   assert.doesNotMatch(controller, /DATABASE_URL.*res\.(json|send)/);
+});
+
+test("monthly subscriptions pause safely and preserve an auditable revenue ledger", () => {
+  const migration = source("prisma/migrations/20260813213000_add_tenant_subscriptions/migration.sql");
+  const controller = source("src/controllers/tenantController.js");
+  const routes = source("src/routes/tenantRoutes.js");
+  const reporter = source("src/utils/telemetryReporter.js");
+  const now = new Date("2026-01-31T12:00:00.000Z");
+  const february = addCalendarMonth(now);
+
+  assert.equal(february.toISOString(), "2026-02-28T12:00:00.000Z");
+  assert.equal(subscriptionState({ status: "ACTIVE", subscriptionExempt: false, subscriptionEndsAt: "2026-02-01T00:00:00.000Z" }, now).code, "ACTIVE");
+  assert.equal(subscriptionState({ status: "ACTIVE", subscriptionExempt: false, subscriptionEndsAt: "2025-12-01T00:00:00.000Z" }, now).code, "PAST_DUE");
+  assert.equal(subscriptionAccess({ companyName: "Acme", status: "ACTIVE", subscriptionExempt: false, subscriptionEndsAt: null }, now).allowed, false);
+  assert.match(migration, /monthly_price_minor/);
+  assert.match(migration, /CREATE TABLE "tenant_subscription_payments"/);
+  assert.match(controller, /RENEW_TENANT_SUBSCRIPTION/);
+  assert.match(controller, /collectedThisMonthMinor/);
+  assert.match(routes, /subscription\/renew/);
+  assert.match(reporter, /status\(402\)/);
+  assert.match(reporter, /subscriptionCache\.subscriptionEndsAt/);
+  assert.match(reporter, /60_000/);
 });
