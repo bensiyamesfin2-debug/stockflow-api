@@ -47,6 +47,12 @@ test("the SaaS control plane stores metadata only and provisions dedicated datab
   assert.match(routes, /authorizePlatformOwner, authorizeControlPlane/);
 });
 
+test("the API does not serve a second browser console or bundled demo credentials", () => {
+  const app = source("src/app.js");
+  assert.doesNotMatch(app, /express\.static/);
+  assert.equal(fs.existsSync(path.join(__dirname, "..", "stockflow-console.html")), false);
+});
+
 test("tenant monitoring stores hashed credentials and metadata-only error aggregates", () => {
   const migration = source("prisma/migrations/20260812150000_add_tenant_operations_monitoring/migration.sql");
   const telemetry = source("src/controllers/telemetryController.js");

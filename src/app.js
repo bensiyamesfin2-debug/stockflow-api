@@ -1,4 +1,3 @@
-const path = require("path");
 const express = require("express");
 const cors = require("cors");
 const prisma = require("./config/prisma");
@@ -80,8 +79,6 @@ app.use(
   })
 );
 app.use(express.json({ limit: "1mb" }));
-app.use(express.static(path.join(__dirname, "..", "public")));
-app.use(express.static("public"));
 app.use((req, res, next) => {
   const startedAt = Date.now();
   const requestId = req.get("x-request-id") || require("crypto").randomUUID();
