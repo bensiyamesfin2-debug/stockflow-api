@@ -11,6 +11,8 @@ const CORE_PRODUCT_FAMILIES = new Map([
   ["black galaxy", "Black Galaxy"],
   ["river black", "River Black"],
   ["tiger skin", "Tiger Skin"],
+  ["spw", "SPW"],
+  ["fq", "FQ"],
 ]);
 
 function normalizeProductName(value) {

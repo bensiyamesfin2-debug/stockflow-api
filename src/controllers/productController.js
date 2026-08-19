@@ -8,6 +8,7 @@ const {
   normalizeProductName,
   makeInternalSku,
 } = require("../utils/productCatalog");
+const { cellText, normalizeImportHeader } = require("../utils/excelCells");
 
 const ALLOWED_MEASUREMENTS = new Set([
   "220x34x3", "200x34x3", "180x34x3", "160x34x3", "150x34x3",
@@ -160,20 +161,6 @@ function validateProductInput(body, partial = false) {
   return { data, reorderLevel, errors };
 }
 
-function cellText(cell) {
-  const value = cell?.value;
-  if (value === null || value === undefined) return "";
-  if (typeof value === "object") {
-    if (value.result !== undefined) return String(value.result).trim();
-    if (Array.isArray(value.richText)) return value.richText.map((part) => part.text).join("").trim();
-    if (value.text !== undefined) return String(value.text).trim();
-  }
-  return String(value).trim();
-}
-
-function normalizeImportHeader(value) {
-  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-}
 
 const IMPORT_HEADERS = {
   name: ["product name", "product", "name", "item name"],

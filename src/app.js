@@ -4,6 +4,7 @@ const prisma = require("./config/prisma");
 
 const authRoutes = require("./routes/authRoutes");
 const categoryRoutes = require("./routes/categoryRoutes");
+const cashWithdrawalRoutes = require("./routes/cashWithdrawalRoutes");
 const customerRoutes = require("./routes/customerRoutes");
 const discountRoutes = require("./routes/discountRoutes");
 const exportRoutes = require("./routes/exportRoutes");
@@ -132,6 +133,7 @@ app.use(enforceSubscription);
 
 app.use("/api/auth", authRoutes);
 app.use("/api/categories", categoryRoutes);
+app.use("/api/cash-withdrawals", cashWithdrawalRoutes);
 app.use("/api/customers", customerRoutes);
 app.use("/api/discounts", discountRoutes);
 app.use("/api/exports", exportRoutes);

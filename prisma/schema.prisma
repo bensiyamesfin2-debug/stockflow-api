@@ -113,6 +113,7 @@ model User {
   stockCountsCompleted StockCount[]        @relation("StockCountsCompleted")
   stockCountsAdjusted  StockCount[]        @relation("StockCountsAdjusted")
   shifts               Shift[]
+  cashWithdrawals      CashWithdrawal[]    @relation("CashWithdrawalsRecorded")
   preferences          UserPreference?
   notes                WorkspaceNote[]
   calendarEvents       CalendarEvent[]     @relation("CalendarEventOwner")
@@ -894,6 +895,19 @@ model Shift {
   @@index([userId, status])
   @@index([openedAt])
   @@map("shifts")
+}
+
+model CashWithdrawal {
+  id            Int      @id @default(autoincrement())
+  amount        Decimal  @db.Decimal(12, 2)
+  reason        String   @db.VarChar(500)
+  withdrawnById Int      @map("withdrawn_by_id")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  withdrawnBy   User     @relation("CashWithdrawalsRecorded", fields: [withdrawnById], references: [id], onDelete: Restrict)
+
+  @@index([withdrawnById])
+  @@index([createdAt])
+  @@map("cash_withdrawals")
 }
 
 model WorkspaceSettings {

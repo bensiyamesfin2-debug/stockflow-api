@@ -15,6 +15,9 @@ const { sendCsv, parseDate } = require("../src/controllers/exportController");
 const { buildProfessionalWorkbook } = require("../src/utils/professionalWorkbook");
 const ExcelJS = require("exceljs");
 const { parseProductWorkbook } = require("../src/controllers/productController");
+const { parseHistoricalSaleWorkbook, applyFifoPayment } = require("../src/controllers/historicalSaleController");
+const { normalizeCashWithdrawal } = require("../src/controllers/cashWithdrawalController");
+const { normalizeProductName, makeInternalSku } = require("../src/utils/productCatalog");
 const { allocateTransferBatches, normalizeTransfer } = require("../src/controllers/inventoryController");
 const {
   validateSaleRequest,
@@ -379,6 +382,67 @@ test("Excel import and manual product creation match existing products by name a
     /prisma\.product\.findFirst\(\{\s*where: \{ name: data\.name, length: data\.length, width: data\.width, thickness: data\.thickness \}/
   );
   assert.match(source, /existingByIdentity/);
+});
+
+test("historical sale import reads Sale and Payment rows from a workbook", async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("Sales History");
+  sheet.addRow(["Row Type", "Date", "Customer Name", "Product Name", "Length (cm)", "Width (cm)", "Thickness (cm)", "Quantity", "Unit Price (ETB)", "Amount (ETB)", "Payment Method", "Note"]);
+  sheet.addRow(["Sale", "2018-11-06", "Ashebire", "602", 200, 50, 2, 4, 7700, "", "", ""]);
+  sheet.addRow(["Payment", "2018-11-10", "Ashebire", "", "", "", "", "", "", 100000, "Bank Transfer", "bensiya cbe"]);
+  const result = await parseHistoricalSaleWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()));
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.rows.length, 2);
+  assert.equal(result.rows[0].type, "SALE");
+  assert.equal(result.rows[0].totalCents, 30800n * 100n);
+  assert.equal(result.rows[1].type, "PAYMENT");
+  assert.equal(result.rows[1].amountCents, 100000n * 100n);
+  assert.equal(result.rows[1].paymentMethod, "BANK_TRANSFER");
+});
+
+test("historical sale import rejects a row that mixes Sale and Payment fields incorrectly", async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("Sales History");
+  sheet.addRow(["Row Type", "Date", "Customer Name", "Product Name", "Length (cm)", "Width (cm)", "Thickness (cm)", "Quantity", "Unit Price (ETB)", "Amount (ETB)", "Payment Method", "Note"]);
+  sheet.addRow(["Refund", "2018-11-06", "Ashebire", "602", 200, 50, 2, 4, 7700, "", "", ""]);
+  const result = await parseHistoricalSaleWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()));
+  assert.equal(result.rows.length, 0);
+  assert.match(result.errors[0], /Row Type must be "Sale" or "Payment"/);
+});
+
+test("historical sale payments apply oldest-debt-first and report what could not be applied", () => {
+  const openSales = [{ id: 1, remainingCents: 30800n }, { id: 2, remainingCents: 7700n }];
+  const first = applyFifoPayment(openSales, 35000n);
+  assert.deepEqual(first.applications.map((a) => [a.sale.id, a.appliedCents]), [[1, 30800n], [2, 4200n]]);
+  assert.equal(first.unappliedCents, 0n);
+  assert.equal(openSales[0].remainingCents, 0n);
+  assert.equal(openSales[1].remainingCents, 3500n);
+
+  const overpayment = applyFifoPayment(openSales, 999999n);
+  assert.deepEqual(overpayment.applications.map((a) => [a.sale.id, a.appliedCents]), [[2, 3500n]]);
+  assert.equal(overpayment.unappliedCents, 999999n - 3500n);
+  assert.equal(openSales[1].remainingCents, 0n);
+});
+
+test("cash withdrawals require a reason explaining what the money was for", () => {
+  const missing = normalizeCashWithdrawal({ amount: 5000 });
+  assert.equal(missing.errors.length, 1);
+  assert.match(missing.errors[0], /Reason must explain/);
+
+  const zero = normalizeCashWithdrawal({ amount: 0, reason: "Fuel" });
+  assert.match(zero.errors[0], /Amount must be a positive amount/);
+
+  const valid = normalizeCashWithdrawal({ amount: "5000.00", reason: "Fuel for delivery truck" });
+  assert.deepEqual(valid.errors, []);
+  assert.equal(valid.data.amount, "5000.00");
+  assert.equal(valid.data.reason, "Fuel for delivery truck");
+});
+
+test("SPW and FQ are recognised as core stock products with stable SKUs", () => {
+  assert.deepEqual(normalizeProductName("spw"), { name: "SPW" });
+  assert.deepEqual(normalizeProductName("Fq"), { name: "FQ" });
+  assert.match(makeInternalSku("SPW", 200, 34, 3), /^SPW-200-34-3$/);
+  assert.match(makeInternalSku("FQ", 130, 34, 3), /^FQ-130-34-3$/);
 });
 
 test("warehouse transfer allocates oldest batches and detects duplicate product lines", () => {
