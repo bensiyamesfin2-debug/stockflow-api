@@ -363,6 +363,24 @@ test("Excel catalogue import reads product dimensions and optional opening quant
   assert.equal(result.rows[0].quantityToAdd, 24);
 });
 
+test("Excel import and manual product creation match existing products by name and dimensions, not just the derived SKU", () => {
+  // Regression: makeInternalSku's output changes when a name joins CORE_PRODUCT_FAMILIES
+  // (see productCatalog.js history for "603"/"664"). Products created before that point keep
+  // their old SKU, so matching re-imports/re-adds by SKU alone made every later import create a
+  // duplicate product instead of restocking the existing one. Matching by name + dimensions fixes
+  // that regardless of how the SKU algorithm evolves.
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "controllers", "productController.js"), "utf8");
+  assert.match(
+    source,
+    /transaction\.product\.findFirst\(\{\s*where: \{ name: row\.data\.name, length: row\.data\.length, width: row\.data\.width, thickness: row\.data\.thickness \}/
+  );
+  assert.match(
+    source,
+    /prisma\.product\.findFirst\(\{\s*where: \{ name: data\.name, length: data\.length, width: data\.width, thickness: data\.thickness \}/
+  );
+  assert.match(source, /existingByIdentity/);
+});
+
 test("warehouse transfer allocates oldest batches and detects duplicate product lines", () => {
   const batches = [
     { id: 1, availableQuantity: 2, createdAt: new Date("2026-01-01") },

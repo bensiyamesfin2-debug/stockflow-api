@@ -276,16 +276,26 @@ async function parseProductWorkbook(buffer) {
   return { rows, errors };
 }
 
+function productIdentityKey(name, length, width, thickness) {
+  return `${name}||${length}||${width}||${thickness}`;
+}
+
 async function productImportPlan(buffer, role) {
   const parsed = await parseProductWorkbook(buffer);
   if (parsed.errors.length) return { ...parsed, creates: 0, updates: 0, categoriesToCreate: [] };
+  // Matching on name + dimensions (not the derived SKU) so a product survives even if the
+  // SKU algorithm changed (e.g. a name was later added to CORE_PRODUCT_FAMILIES) since it was created.
   const [existingProducts, existingCategories] = await Promise.all([
-    prisma.product.findMany({ where: { sku: { in: parsed.rows.map((row) => row.sku) } }, select: { sku: true } }),
+    prisma.product.findMany({
+      where: { OR: parsed.rows.map((row) => ({ name: row.data.name, length: row.data.length, width: row.data.width, thickness: row.data.thickness })) },
+      select: { sku: true, name: true, length: true, width: true, thickness: true },
+    }),
     prisma.category.findMany({ select: { name: true } }),
   ]);
-  const existingSkus = new Set(existingProducts.map((product) => product.sku));
+  const existingByIdentity = new Set(existingProducts.map((product) => productIdentityKey(product.name, product.length, product.width, product.thickness)));
   const categoryNames = new Set(existingCategories.map((category) => category.name.toLowerCase()));
   const categoriesToCreate = [...new Set(parsed.rows.map((row) => row.category).filter(Boolean))].filter((name) => !categoryNames.has(name.toLowerCase()));
+  const rowExists = (row) => existingByIdentity.has(productIdentityKey(row.data.name, row.data.length, row.data.width, row.data.thickness));
   return {
     ...parsed,
     rows: parsed.rows.map((row) => ({
@@ -296,10 +306,10 @@ async function productImportPlan(buffer, role) {
       category: row.category,
       sellingPrice: row.data.sellingPrice,
       quantityToAdd: row.quantityToAdd,
-      action: existingSkus.has(row.sku) ? "UPDATE" : "CREATE",
+      action: rowExists(row) ? "UPDATE" : "CREATE",
     })),
-    creates: parsed.rows.filter((row) => !existingSkus.has(row.sku)).length,
-    updates: parsed.rows.filter((row) => existingSkus.has(row.sku)).length,
+    creates: parsed.rows.filter((row) => !rowExists(row)).length,
+    updates: parsed.rows.filter((row) => rowExists(row)).length,
     unitsToAdd: parsed.rows.reduce((sum, row) => sum + row.quantityToAdd, 0),
     categoriesToCreate,
     parsedRows: parsed.rows,
@@ -331,13 +341,23 @@ async function importProducts(req, res) {
       categoryByName.set(restored.name.toLowerCase(), restored);
     }
     for (const row of plan.parsedRows) {
-      const existing = await transaction.product.findUnique({ where: { sku: row.sku } });
+      // Match the existing product by name + dimensions rather than the derived SKU: the SKU
+      // algorithm can change over time (e.g. a name joining CORE_PRODUCT_FAMILIES), which would
+      // otherwise make re-importing the same product create a duplicate instead of restocking it.
+      const existing = await transaction.product.findFirst({
+        where: { name: row.data.name, length: row.data.length, width: row.data.width, thickness: row.data.thickness },
+        orderBy: { id: "asc" },
+      });
       const productData = {
         ...row.data,
         sku: row.sku,
         sellingPrice: row.data.sellingPrice,
         categoryId: row.category ? categoryByName.get(row.category.toLowerCase()).id : null,
       };
+      if (existing && existing.sku !== row.sku) {
+        const skuOwner = await transaction.product.findUnique({ where: { sku: row.sku }, select: { id: true } });
+        if (skuOwner && skuOwner.id !== existing.id) delete productData.sku;
+      }
       const product = existing
         ? await transaction.product.update({ where: { id: existing.id }, data: productData })
         : await transaction.product.create({ data: productData });
@@ -418,8 +438,12 @@ async function createProduct(req, res) {
     data.thickness
   );
 
-  const existingProduct = await prisma.product.findUnique({
-    where: { sku: data.sku },
+  // Match by name + dimensions, not the derived SKU: the SKU algorithm can change over time
+  // (e.g. a name joining CORE_PRODUCT_FAMILIES), which would otherwise let the same product get
+  // re-created as a duplicate instead of being recognised.
+  const existingProduct = await prisma.product.findFirst({
+    where: { name: data.name, length: data.length, width: data.width, thickness: data.thickness },
+    orderBy: { id: "asc" },
   });
 
   if (existingProduct?.isActive) {
@@ -427,6 +451,10 @@ async function createProduct(req, res) {
       success: false,
       message: "That product and measurement already exist",
     });
+  }
+  if (existingProduct && existingProduct.sku !== data.sku) {
+    const skuOwner = await prisma.product.findUnique({ where: { sku: data.sku }, select: { id: true } });
+    if (skuOwner && skuOwner.id !== existingProduct.id) delete data.sku;
   }
   if (req.user.role === "INVENTORY_STAFF" && existingProduct) {
     delete data.sellingPrice;
