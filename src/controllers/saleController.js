@@ -1,4 +1,5 @@
 const { randomUUID } = require("crypto");
+const ExcelJS = require("exceljs");
 const prisma = require("../config/prisma");
 const HttpError = require("../utils/HttpError");
 const { moneyToCents, centsToMoney } = require("../utils/money");
@@ -15,6 +16,7 @@ const {
   planCustomCuts,
   normalizeCustomMeasurement,
 } = require("../utils/customOrder");
+const { parseSalesWorkbook, productLabel } = require("../utils/salesWorkbook");
 
 const PAYMENT_METHODS = new Set([
   "CASH",
@@ -74,8 +76,8 @@ const saleInclude = {
   },
 };
 
-function makeSaleNumber() {
-  const date = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+function makeSaleNumber(saleDate = new Date()) {
+  const date = saleDate.toISOString().slice(0, 10).replaceAll("-", "");
   return `SALE-${date}-${randomUUID().slice(0, 8).toUpperCase()}`;
 }
 
@@ -1094,6 +1096,194 @@ async function returnSale(req, res) {
   return res.status(201).json({ success: true, message: "Sale return recorded, stock restored where selected, and payment status recalculated", data: { sale: serializeSale(returnedSale) } });
 }
 
+async function salesImportPlan(buffer) {
+  const products = await prisma.product.findMany({
+    where: { isActive: true },
+    include: { inventory: true, category: { select: { id: true, name: true } } },
+    orderBy: [{ name: "asc" }, { length: "desc" }, { width: "desc" }, { thickness: "desc" }],
+  });
+  const parsed = await parseSalesWorkbook(buffer, products);
+  if (parsed.errors.length) return parsed;
+
+  const requestedByProduct = new Map();
+  for (const row of parsed.rows) {
+    if (row.paymentMethod === "LEGACY_UNKNOWN") continue;
+    const requested = (requestedByProduct.get(row.product.id) || 0) + row.quantity;
+    requestedByProduct.set(row.product.id, requested);
+    const available = (row.product.inventory?.quantity || 0) - (row.product.inventory?.reservedQuantity || 0);
+    if (requested > available) {
+      parsed.errors.push(`Row ${row.rowNumber}: only ${Math.max(0, available - requested + row.quantity)} more unit(s) of ${productLabel(row.product)} are available for this workbook`);
+    }
+  }
+  return parsed;
+}
+
+function publicSalesImportPreview(plan) {
+  return {
+    rows: plan.rows.map((row) => ({
+      rowNumber: row.rowNumber,
+      saleDate: row.saleDate.toISOString(),
+      productId: row.product.id,
+      product: productLabel(row.product),
+      productType: row.productType,
+      quantity: row.quantity,
+      amount: centsToMoney(row.amountCents),
+      paymentMethod: row.paymentMethod,
+      bankName: row.bankName,
+      recipientAccount: row.recipientAccount,
+    })),
+    sales: plan.rows.length,
+    units: plan.rows.reduce((total, row) => total + row.quantity, 0),
+    amount: centsToMoney(plan.rows.reduce((total, row) => total + row.amountCents, 0n)),
+    creditAmount: centsToMoney(plan.rows.filter((row) => row.paymentMethod === "CREDIT").reduce((total, row) => total + row.amountCents, 0n)),
+    legacySales: plan.rows.filter((row) => row.paymentMethod === "LEGACY_UNKNOWN").length,
+  };
+}
+
+async function previewSalesImport(req, res) {
+  const plan = await salesImportPlan(req.body);
+  return res.status(plan.errors.length ? 400 : 200).json({
+    success: plan.errors.length === 0,
+    message: plan.errors.length ? "Fix the workbook errors before importing" : "Sales workbook validated and ready to import",
+    errors: plan.errors,
+    data: { preview: publicSalesImportPreview(plan) },
+  });
+}
+
+async function importSales(req, res) {
+  const plan = await salesImportPlan(req.body);
+  if (plan.errors.length) return res.status(400).json({ success: false, message: "Fix the workbook errors before importing", errors: plan.errors });
+
+  const counts = await runSerializableTransaction(async (transaction) => {
+    const productIds = [...new Set(plan.rows.map((row) => row.product.id))];
+    const products = await transaction.product.findMany({ where: { id: { in: productIds }, isActive: true }, include: { inventory: true } });
+    const productById = new Map(products.map((product) => [product.id, product]));
+    const requestedByProduct = new Map();
+    for (const row of plan.rows) {
+      if (row.paymentMethod !== "LEGACY_UNKNOWN") requestedByProduct.set(row.product.id, (requestedByProduct.get(row.product.id) || 0) + row.quantity);
+    }
+    for (const [productId, quantity] of requestedByProduct) {
+      const product = productById.get(productId);
+      if (!product) throw new HttpError(409, "A product in this workbook is no longer active");
+      const available = (product.inventory?.quantity || 0) - (product.inventory?.reservedQuantity || 0);
+      if (available < quantity) throw new HttpError(409, `Only ${available} unit(s) of ${product.name} are now available`);
+    }
+
+    const [activeShift, inventoryStaff] = await Promise.all([
+      transaction.shift.findFirst({ where: { userId: req.user.id, status: "OPEN" }, orderBy: { openedAt: "desc" }, select: { id: true } }),
+      transaction.user.findMany({ where: { role: "INVENTORY_STAFF", isActive: true }, select: { id: true } }),
+    ]);
+    const createdIds = [];
+    for (const row of plan.rows) {
+      const product = productById.get(row.product.id);
+      const credit = row.paymentMethod === "CREDIT";
+      const legacy = row.paymentMethod === "LEGACY_UNKNOWN";
+      const quantity = BigInt(row.quantity);
+      const baseUnitPriceCents = row.amountCents / quantity;
+      const higherPriceQuantity = Number(row.amountCents % quantity);
+      const saleNumber = makeSaleNumber(row.saleDate);
+      const sale = await transaction.sale.create({ data: {
+        saleNumber,
+        cashierId: req.user.id,
+        shiftId: activeShift?.id || null,
+        totalAmount: centsToMoney(row.amountCents),
+        creditBalance: credit ? centsToMoney(row.amountCents) : "0.00",
+        status: legacy ? "COMPLETED" : "PENDING_RELEASE",
+        completedAt: legacy ? row.saleDate : null,
+        createdAt: row.saleDate,
+      } });
+      const priceGroups = [
+        { quantity: higherPriceQuantity, unitPriceCents: baseUnitPriceCents + 1n },
+        { quantity: row.quantity - higherPriceQuantity, unitPriceCents: baseUnitPriceCents },
+      ].filter((group) => group.quantity > 0);
+      for (const group of priceGroups) {
+        await transaction.saleItem.create({ data: {
+          saleId: sale.id,
+          productId: product.id,
+          quantity: group.quantity,
+          unitPrice: centsToMoney(group.unitPriceCents),
+          costPriceAtSale: product.costPrice,
+          releasedQuantity: legacy ? group.quantity : 0,
+        } });
+      }
+      if (!legacy) await transaction.inventory.update({ where: { productId: product.id }, data: { reservedQuantity: { increment: row.quantity } } });
+      if (!credit && row.paymentMethod !== "LEGACY_UNKNOWN") {
+        await transaction.payment.create({ data: {
+          saleId: sale.id,
+          paymentMethod: row.paymentMethod,
+          amount: centsToMoney(row.amountCents),
+          bankName: row.bankName,
+          recipientAccount: row.recipientAccount,
+          transactionReference: row.paymentMethod === "CASH" ? null : `EXCEL-${saleNumber}`,
+          recordedById: req.user.id,
+          createdAt: row.saleDate,
+        } });
+      }
+      if (!legacy && inventoryStaff.length) {
+        const notification = buildSaleNotification({ saleNumber, customerName: null, items: [{ quantity: row.quantity }] });
+        await transaction.notification.createMany({ data: inventoryStaff.map((staff) => ({ userId: staff.id, saleId: sale.id, ...notification })) });
+      }
+      createdIds.push(sale.id);
+    }
+    const result = {
+      sales: plan.rows.length,
+      units: plan.rows.reduce((total, row) => total + row.quantity, 0),
+      amount: centsToMoney(plan.rows.reduce((total, row) => total + row.amountCents, 0n)),
+      creditSales: plan.rows.filter((row) => row.paymentMethod === "CREDIT").length,
+      legacySales: plan.rows.filter((row) => row.paymentMethod === "LEGACY_UNKNOWN").length,
+      source: "StockFlow Sales Entry Excel",
+      saleIds: createdIds,
+    };
+    await transaction.auditLog.create({ data: { userId: req.user.id, action: "IMPORT_SALES_WORKBOOK", entityType: "SALE", details: result } });
+    return result;
+  });
+
+  const releaseCount = counts.sales - counts.legacySales;
+  return res.status(201).json({ success: true, message: `${counts.sales} sales imported from Excel${releaseCount ? `; ${releaseCount} sent to warehouse release` : "; historical inventory was left unchanged"}`, data: { counts } });
+}
+
+async function downloadSalesImportTemplate(req, res) {
+  const products = await prisma.product.findMany({ where: { isActive: true }, include: { category: { select: { name: true } } }, orderBy: [{ name: "asc" }, { length: "desc" }] });
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "StockFlow";
+  workbook.created = new Date();
+  const sheet = workbook.addWorksheet("Sales Entry", { views: [{ state: "frozen", ySplit: 8 }] });
+  sheet.mergeCells("A1:J1"); sheet.getCell("A1").value = "STOCKFLOW SALES ENTRY TEMPLATE";
+  sheet.mergeCells("A2:J2"); sheet.getCell("A2").value = "Enter one sale per row. Use the exact catalogue SKU or product label shown on the Catalogue Guide sheet.";
+  sheet.mergeCells("A4:B4"); sheet.getCell("A4").value = "TOTAL SALES"; sheet.getCell("A5").value = { formula: "SUM(E9:E2008)", result: 0 };
+  sheet.mergeCells("C4:D4"); sheet.getCell("C4").value = "TOTAL QUANTITY"; sheet.getCell("C5").value = { formula: "SUM(D9:D2008)", result: 0 };
+  sheet.mergeCells("A7:J7"); sheet.getCell("A7").value = "ENTER SALES BELOW — preview and validate before importing";
+  const headers = ["Date of Sale", "Product Type", "Material / Product", "Quantity Sold", "Amount (ETB)", "Payment Type", "Bank Name", "Recipient Account No.", "Payment Details", "Notes"];
+  sheet.getRow(8).values = headers;
+  sheet.columns = [{ width: 15 }, { width: 20 }, { width: 42 }, { width: 15 }, { width: 17 }, { width: 18 }, { width: 25 }, { width: 24 }, { width: 27 }, { width: 30 }];
+  for (let row = 9; row <= 208; row += 1) {
+    sheet.getCell(`F${row}`).dataValidation = { type: "list", allowBlank: false, formulae: ['"Bank Transfer,Credit,Cash,Mobile Money,Card,Legacy / Unknown"'] };
+    sheet.getCell(`I${row}`).value = { formula: `IF(F${row}="Credit","Credit",IF(F${row}="Bank Transfer",IF(OR(G${row}="",H${row}=""),"Add bank + account",G${row}&" · "&H${row}),F${row}))`, result: "" };
+    sheet.getCell(`A${row}`).numFmt = "yyyy-mm-dd";
+    sheet.getCell(`D${row}`).numFmt = "0";
+    sheet.getCell(`E${row}`).numFmt = '#,##0.00 "ETB"';
+    sheet.getCell(`H${row}`).numFmt = "@";
+  }
+  for (const range of ["A1:J1"]) { const row = sheet.getRow(Number(range.match(/\d+/)[0])); row.height = 34; }
+  sheet.getRow(1).eachCell((cell) => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF111111" } }; cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 18 }; });
+  sheet.getRow(8).eachCell((cell) => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF176B5B" } }; cell.font = { bold: true, color: { argb: "FFFFFFFF" } }; cell.alignment = { wrapText: true, vertical: "middle" }; });
+  sheet.getRow(8).height = 30;
+  sheet.autoFilter = { from: "A8", to: "J208" };
+
+  const guide = workbook.addWorksheet("Catalogue Guide", { views: [{ state: "frozen", ySplit: 1 }] });
+  guide.columns = [{ header: "Product Type", key: "type", width: 22 }, { header: "Material / Product — paste this exact label", key: "label", width: 60 }, { header: "Available SKU", key: "sku", width: 28 }];
+  products.forEach((product) => guide.addRow({ type: product.category?.name || product.name, label: productLabel(product), sku: product.sku }));
+  guide.getRow(1).eachCell((cell) => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF111111" } }; cell.font = { bold: true, color: { argb: "FFFFFFFF" } }; });
+  const instructions = workbook.addWorksheet("Instructions");
+  instructions.getColumn(1).width = 110;
+  ["STOCKFLOW SALES IMPORT", "Keep the Sales Entry headers unchanged.", "Material / Product must be an exact SKU or the full label from Catalogue Guide.", "Bank Transfer needs Bank Name and Recipient Account No. Credit needs neither; Payment Details will say Credit.", "Use Legacy / Unknown only for old records whose original payment destination was not captured. Revenue is preserved, but collected-payment reporting stays unclassified.", "Every imported row becomes one pending sale and reserves its quantity for warehouse release.", "Always use Preview & validate before importing. Importing the same file again creates duplicate sales."].forEach((text) => instructions.addRow([text]));
+  instructions.getCell("A1").font = { bold: true, size: 16 };
+  const buffer = await workbook.xlsx.writeBuffer();
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", 'attachment; filename="stockflow-sales-import-template.xlsx"');
+  return res.send(Buffer.from(buffer));
+}
+
 module.exports = {
   createSale,
   updateSale,
@@ -1102,6 +1292,10 @@ module.exports = {
   getSale,
   cancelSale,
   returnSale,
+  previewSalesImport,
+  importSales,
+  downloadSalesImportTemplate,
+  salesImportPlan,
   validateSaleRequest,
   sumQuantityByProduct,
 };

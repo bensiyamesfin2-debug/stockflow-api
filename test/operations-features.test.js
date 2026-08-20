@@ -15,6 +15,7 @@ const { sendCsv, parseDate } = require("../src/controllers/exportController");
 const { buildProfessionalWorkbook } = require("../src/utils/professionalWorkbook");
 const ExcelJS = require("exceljs");
 const { parseProductWorkbook } = require("../src/controllers/productController");
+const { parseSalesWorkbook } = require("../src/utils/salesWorkbook");
 const { allocateTransferBatches, normalizeTransfer } = require("../src/controllers/inventoryController");
 const {
   validateSaleRequest,
@@ -361,6 +362,37 @@ test("Excel catalogue import reads product dimensions and optional opening quant
   assert.equal(result.rows[0].sku, "603-220-34-3");
   assert.equal(result.rows[0].reorderLevel, 7);
   assert.equal(result.rows[0].quantityToAdd, 24);
+});
+
+test("StockFlow sales workbook finds row 8 headers and validates bank or credit details", async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("Sales Entry");
+  sheet.getRow(8).values = ["Date of Sale", "Product Type", "Material / Product", "Quantity Sold", "Amount (ETB)", "Payment Type", "Bank Name", "Recipient Account No.", "Payment Details", "Notes"];
+  sheet.getRow(9).values = [new Date("2026-08-19T12:00:00Z"), "Granite", "BG-220-34-3", 2, 5000, "Bank Transfer", "Commercial Bank of Ethiopia", "10001-2345", "", "Counter sale"];
+  sheet.getRow(10).values = [new Date("2026-08-19T12:00:00Z"), "Granite", "BG-220-34-3", 1, 2500, "Credit", "", "", "Credit", ""];
+  sheet.getRow(11).values = [new Date("2018-11-04T12:00:00Z"), "Granite", "BG-220-34-3", 1, 2500, "Legacy / Unknown", "", "", "Legacy / Unknown", "Imported history"];
+  const products = [{ id: 7, sku: "BG-220-34-3", name: "Black Galaxy", length: 220, width: 34, thickness: 3, isActive: true }];
+  const result = await parseSalesWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()), products);
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.headerRow, 8);
+  assert.equal(result.rows.length, 3);
+  assert.equal(result.rows[0].paymentMethod, "BANK_TRANSFER");
+  assert.equal(result.rows[0].recipientAccount, "10001-2345");
+  assert.equal(result.rows[1].paymentMethod, "CREDIT");
+  assert.equal(result.rows[1].bankName, null);
+  assert.equal(result.rows[1].amountCents, 250000n);
+  assert.equal(result.rows[2].paymentMethod, "LEGACY_UNKNOWN");
+});
+
+test("StockFlow sales workbook rejects bank transfers without their destination", async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("Sales Entry");
+  sheet.addRow(["Date of Sale", "Product Type", "Material / Product", "Quantity Sold", "Amount", "Payment Type", "Bank Name", "Account No"]);
+  sheet.addRow(["2026-08-19", "Granite", "BG-220-34-3", 1, 2500, "Bank Transfer", "", ""]);
+  const products = [{ id: 7, sku: "BG-220-34-3", name: "Black Galaxy", length: 220, width: 34, thickness: 3, isActive: true }];
+  const result = await parseSalesWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()), products);
+  assert.match(result.errors.join(" "), /requires Bank Name/);
+  assert.match(result.errors.join(" "), /requires Recipient Account No/);
 });
 
 test("warehouse transfer allocates oldest batches and detects duplicate product lines", () => {
