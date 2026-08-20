@@ -69,6 +69,11 @@ enum ShiftStatus {
   CLOSED
 }
 
+enum OwnerExpenseEntryType {
+  IN
+  OUT
+}
+
 enum QuotationStatus {
   DRAFT
   SENT
@@ -86,97 +91,98 @@ enum SaasTenantStatus {
 }
 
 model User {
-  id                   Int                 @id @default(autoincrement())
-  fullName             String              @map("full_name") @db.VarChar(150)
-  username             String              @unique @db.VarChar(100)
-  passwordHash         String              @map("password_hash")
+  id                   Int                         @id @default(autoincrement())
+  fullName             String                      @map("full_name") @db.VarChar(150)
+  username             String                      @unique @db.VarChar(100)
+  passwordHash         String                      @map("password_hash")
   role                 UserRole
-  isActive             Boolean             @default(true) @map("is_active")
-  failedLoginAttempts  Int                 @default(0) @map("failed_login_attempts")
-  lockedUntil          DateTime?           @map("locked_until") @db.Timestamptz(3)
-  lastLoginAt          DateTime?           @map("last_login_at") @db.Timestamptz(3)
-  passwordChangedAt    DateTime            @default(now()) @map("password_changed_at") @db.Timestamptz(3)
-  tokenVersion         Int                 @default(0) @map("token_version")
-  createdAt            DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt            DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
-  sales                Sale[]              @relation("CashierSales")
-  paymentsRecorded     Payment[]           @relation("RecordedPayments")
-  inventoryReleases    InventoryRelease[]  @relation("ReleasedBy")
-  stockReceipts        StockReceipt[]      @relation("ReceivedBy")
-  inventoryMovements   InventoryMovement[] @relation("MovementCreatedBy")
-  auditLogs            AuditLog[]          @relation("UserAuditLogs")
+  isActive             Boolean                     @default(true) @map("is_active")
+  failedLoginAttempts  Int                         @default(0) @map("failed_login_attempts")
+  lockedUntil          DateTime?                   @map("locked_until") @db.Timestamptz(3)
+  lastLoginAt          DateTime?                   @map("last_login_at") @db.Timestamptz(3)
+  passwordChangedAt    DateTime                    @default(now()) @map("password_changed_at") @db.Timestamptz(3)
+  tokenVersion         Int                         @default(0) @map("token_version")
+  createdAt            DateTime                    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime                    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  sales                Sale[]                      @relation("CashierSales")
+  paymentsRecorded     Payment[]                   @relation("RecordedPayments")
+  inventoryReleases    InventoryRelease[]          @relation("ReleasedBy")
+  stockReceipts        StockReceipt[]              @relation("ReceivedBy")
+  inventoryMovements   InventoryMovement[]         @relation("MovementCreatedBy")
+  auditLogs            AuditLog[]                  @relation("UserAuditLogs")
   loginPairings        LoginPairing[]
   notifications        Notification[]
   pushSubscriptions    PushSubscription[]
-  purchaseOrders       PurchaseOrder[]     @relation("PurchaseOrdersCreated")
-  stockCountsCreated   StockCount[]        @relation("StockCountsCreated")
-  stockCountsCompleted StockCount[]        @relation("StockCountsCompleted")
-  stockCountsAdjusted  StockCount[]        @relation("StockCountsAdjusted")
+  purchaseOrders       PurchaseOrder[]             @relation("PurchaseOrdersCreated")
+  stockCountsCreated   StockCount[]                @relation("StockCountsCreated")
+  stockCountsCompleted StockCount[]                @relation("StockCountsCompleted")
+  stockCountsAdjusted  StockCount[]                @relation("StockCountsAdjusted")
   shifts               Shift[]
   preferences          UserPreference?
   notes                WorkspaceNote[]
-  calendarEvents       CalendarEvent[]     @relation("CalendarEventOwner")
+  calendarEvents       CalendarEvent[]             @relation("CalendarEventOwner")
   favorites            Favorite[]
   attachments          FileAttachment[]
+  ownerExpenseEntries  OwnerExpenseEntry[]
   invoiceTemplates     InvoiceTemplate[]
-  deliveryProofs       DeliveryProof[]     @relation("DeliveredBy")
-  priceListsCreated    PriceList[]         @relation("PriceListsCreated")
-  stockTransfers       StockTransfer[]     @relation("TransfersCreated")
-  quotations           Quotation[]         @relation("QuotationsCreated")
-  saleReturnsProcessed SaleReturn[]        @relation("SaleReturnsProcessed")
-  twoFactorSecret      String?             @map("two_factor_secret") @db.VarChar(128)
-  twoFactorEnabled     Boolean             @default(false) @map("two_factor_enabled")
-  isPlatformOwner      Boolean             @default(false) @map("is_platform_owner")
-  tenantsCreated       SaasTenant[]        @relation("SaasTenantCreatedBy")
+  deliveryProofs       DeliveryProof[]             @relation("DeliveredBy")
+  priceListsCreated    PriceList[]                 @relation("PriceListsCreated")
+  stockTransfers       StockTransfer[]             @relation("TransfersCreated")
+  quotations           Quotation[]                 @relation("QuotationsCreated")
+  saleReturnsProcessed SaleReturn[]                @relation("SaleReturnsProcessed")
+  twoFactorSecret      String?                     @map("two_factor_secret") @db.VarChar(128)
+  twoFactorEnabled     Boolean                     @default(false) @map("two_factor_enabled")
+  isPlatformOwner      Boolean                     @default(false) @map("is_platform_owner")
+  tenantsCreated       SaasTenant[]                @relation("SaasTenantCreatedBy")
   subscriptionPayments TenantSubscriptionPayment[] @relation("SubscriptionPaymentsRecorded")
 
   @@map("users")
 }
 
 model SaasTenant {
-  id                  String                 @id @default(uuid()) @db.Uuid
-  companyName         String                 @map("company_name") @db.VarChar(160)
-  companyCode         String                 @unique @map("company_code") @db.VarChar(40)
-  slug                String                 @unique @db.VarChar(80)
-  status              SaasTenantStatus       @default(PROVISIONING)
-  plan                String                 @default("GROWTH") @db.VarChar(24)
-  primaryCurrency     String                 @default("ETB") @map("primary_currency") @db.VarChar(3)
-  locale              String                 @default("en") @db.VarChar(10)
-  timezone            String                 @default("Africa/Addis_Ababa") @db.VarChar(64)
-  region              String                 @default("africa-east1") @db.VarChar(48)
-  deploymentUrl       String?                @unique @map("deployment_url") @db.VarChar(500)
-  databaseIsolation   String                 @default("DEDICATED_DATABASE") @map("database_isolation") @db.VarChar(32)
-  monitoringTokenHash String?                @map("monitoring_token_hash") @db.VarChar(64)
-  lastHeartbeatAt     DateTime?              @map("last_heartbeat_at") @db.Timestamptz(3)
-  lastHealthStatus    String                 @default("UNKNOWN") @map("last_health_status") @db.VarChar(24)
-  lastDatabaseOk      Boolean?               @map("last_database_ok")
-  lastVersion         String?                @map("last_version") @db.VarChar(80)
-  lastUptimeSeconds   Int?                   @map("last_uptime_seconds")
-  lastMemoryMb        Int?                   @map("last_memory_mb")
-  lastErrorAt         DateTime?              @map("last_error_at") @db.Timestamptz(3)
-  provisioningStatus String                 @default("NOT_STARTED") @map("provisioning_status") @db.VarChar(32)
-  provisioningStep   String?                @map("provisioning_step") @db.VarChar(80)
-  provisioningError  String?                @map("provisioning_error")
-  provider            String?                @db.VarChar(32)
-  providerDatabaseId String?                @unique @map("provider_database_id") @db.VarChar(80)
-  providerServiceId  String?                @unique @map("provider_service_id") @db.VarChar(80)
-  providerDeployId   String?                @map("provider_deploy_id") @db.VarChar(80)
-  backendUrl          String?                @unique @map("backend_url") @db.VarChar(500)
-  provisioningStartedAt DateTime?           @map("provisioning_started_at") @db.Timestamptz(3)
-  provisioningCompletedAt DateTime?         @map("provisioning_completed_at") @db.Timestamptz(3)
-  monthlyPriceMinor   Int                    @default(1000000) @map("monthly_price_minor")
-  subscriptionCurrency String                @default("ETB") @map("subscription_currency") @db.VarChar(3)
-  subscriptionEndsAt DateTime?               @map("subscription_ends_at") @db.Timestamptz(3)
-  lastSubscriptionPaymentAt DateTime?        @map("last_subscription_payment_at") @db.Timestamptz(3)
-  subscriptionExempt Boolean                 @default(false) @map("subscription_exempt")
-  notes               String?
-  createdById         Int?                   @map("created_by_id")
-  activatedAt         DateTime?              @map("activated_at") @db.Timestamptz(3)
-  createdAt           DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt           DateTime               @updatedAt @map("updated_at") @db.Timestamptz(3)
-  createdBy           User?                  @relation("SaasTenantCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
-  errorAggregates     TenantErrorAggregate[]
-  subscriptionPayments TenantSubscriptionPayment[]
+  id                        String                      @id @default(uuid()) @db.Uuid
+  companyName               String                      @map("company_name") @db.VarChar(160)
+  companyCode               String                      @unique @map("company_code") @db.VarChar(40)
+  slug                      String                      @unique @db.VarChar(80)
+  status                    SaasTenantStatus            @default(PROVISIONING)
+  plan                      String                      @default("GROWTH") @db.VarChar(24)
+  primaryCurrency           String                      @default("ETB") @map("primary_currency") @db.VarChar(3)
+  locale                    String                      @default("en") @db.VarChar(10)
+  timezone                  String                      @default("Africa/Addis_Ababa") @db.VarChar(64)
+  region                    String                      @default("africa-east1") @db.VarChar(48)
+  deploymentUrl             String?                     @unique @map("deployment_url") @db.VarChar(500)
+  databaseIsolation         String                      @default("DEDICATED_DATABASE") @map("database_isolation") @db.VarChar(32)
+  monitoringTokenHash       String?                     @map("monitoring_token_hash") @db.VarChar(64)
+  lastHeartbeatAt           DateTime?                   @map("last_heartbeat_at") @db.Timestamptz(3)
+  lastHealthStatus          String                      @default("UNKNOWN") @map("last_health_status") @db.VarChar(24)
+  lastDatabaseOk            Boolean?                    @map("last_database_ok")
+  lastVersion               String?                     @map("last_version") @db.VarChar(80)
+  lastUptimeSeconds         Int?                        @map("last_uptime_seconds")
+  lastMemoryMb              Int?                        @map("last_memory_mb")
+  lastErrorAt               DateTime?                   @map("last_error_at") @db.Timestamptz(3)
+  provisioningStatus        String                      @default("NOT_STARTED") @map("provisioning_status") @db.VarChar(32)
+  provisioningStep          String?                     @map("provisioning_step") @db.VarChar(80)
+  provisioningError         String?                     @map("provisioning_error")
+  provider                  String?                     @db.VarChar(32)
+  providerDatabaseId        String?                     @unique @map("provider_database_id") @db.VarChar(80)
+  providerServiceId         String?                     @unique @map("provider_service_id") @db.VarChar(80)
+  providerDeployId          String?                     @map("provider_deploy_id") @db.VarChar(80)
+  backendUrl                String?                     @unique @map("backend_url") @db.VarChar(500)
+  provisioningStartedAt     DateTime?                   @map("provisioning_started_at") @db.Timestamptz(3)
+  provisioningCompletedAt   DateTime?                   @map("provisioning_completed_at") @db.Timestamptz(3)
+  monthlyPriceMinor         Int                         @default(1000000) @map("monthly_price_minor")
+  subscriptionCurrency      String                      @default("ETB") @map("subscription_currency") @db.VarChar(3)
+  subscriptionEndsAt        DateTime?                   @map("subscription_ends_at") @db.Timestamptz(3)
+  lastSubscriptionPaymentAt DateTime?                   @map("last_subscription_payment_at") @db.Timestamptz(3)
+  subscriptionExempt        Boolean                     @default(false) @map("subscription_exempt")
+  notes                     String?
+  createdById               Int?                        @map("created_by_id")
+  activatedAt               DateTime?                   @map("activated_at") @db.Timestamptz(3)
+  createdAt                 DateTime                    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt                 DateTime                    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy                 User?                       @relation("SaasTenantCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  errorAggregates           TenantErrorAggregate[]
+  subscriptionPayments      TenantSubscriptionPayment[]
 
   @@index([status, createdAt])
   @@index([createdById])
@@ -184,16 +190,16 @@ model SaasTenant {
 }
 
 model TenantSubscriptionPayment {
-  id            Int        @id @default(autoincrement())
-  tenantId      String     @map("tenant_id") @db.Uuid
-  amountMinor   Int        @map("amount_minor")
-  currency      String     @default("ETB") @db.VarChar(3)
-  coveredFrom   DateTime   @map("covered_from") @db.Timestamptz(3)
-  coveredUntil  DateTime   @map("covered_until") @db.Timestamptz(3)
-  recordedById  Int        @map("recorded_by_id")
-  paidAt        DateTime   @default(now()) @map("paid_at") @db.Timestamptz(3)
-  tenant        SaasTenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  recordedBy    User       @relation("SubscriptionPaymentsRecorded", fields: [recordedById], references: [id], onDelete: Restrict)
+  id           Int        @id @default(autoincrement())
+  tenantId     String     @map("tenant_id") @db.Uuid
+  amountMinor  Int        @map("amount_minor")
+  currency     String     @default("ETB") @db.VarChar(3)
+  coveredFrom  DateTime   @map("covered_from") @db.Timestamptz(3)
+  coveredUntil DateTime   @map("covered_until") @db.Timestamptz(3)
+  recordedById Int        @map("recorded_by_id")
+  paidAt       DateTime   @default(now()) @map("paid_at") @db.Timestamptz(3)
+  tenant       SaasTenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  recordedBy   User       @relation("SubscriptionPaymentsRecorded", fields: [recordedById], references: [id], onDelete: Restrict)
 
   @@index([tenantId, paidAt])
   @@index([paidAt])
@@ -448,6 +454,22 @@ model InventoryMovement {
   @@index([productId, createdAt])
   @@index([referenceType, referenceId])
   @@map("inventory_movements")
+}
+
+model OwnerExpenseEntry {
+  id              Int                   @id @default(autoincrement())
+  entryType       OwnerExpenseEntryType @map("entry_type")
+  amount          Decimal               @db.Decimal(12, 2)
+  balanceAfter    Decimal               @map("balance_after") @db.Decimal(12, 2)
+  note            String?
+  transactionDate DateTime              @map("transaction_date") @db.Timestamptz(3)
+  createdById     Int                   @map("created_by_id")
+  createdAt       DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
+  createdBy       User                  @relation(fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([transactionDate, id])
+  @@index([createdById])
+  @@map("owner_expense_entries")
 }
 
 model InventoryLocation {
