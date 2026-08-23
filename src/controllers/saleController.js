@@ -1151,7 +1151,12 @@ function publicSalesImportPreview(plan) {
     amount: centsToMoney(plan.rows.reduce((total, row) => total + row.amountCents, 0n)),
     creditAmount: centsToMoney(plan.rows.reduce((total, row) => total + row.creditBalanceCents, 0n)),
     legacySales: plan.rows.filter((row) => row.historical || row.paymentMethod === "LEGACY_UNKNOWN").length,
-    inventoryReplacements: new Set(plan.rows.filter((row) => row.remainingInventory !== null).map((row) => row.product.id)).size,
+    inventoryReplacements: new Set(plan.rows
+      .filter((row) => row.remainingInventory !== null)
+      .map((row) => row.product
+        ? `product:${row.product.id}`
+        : `new:${String(row.productSpec?.name || "").toLowerCase()}:${row.productSpec?.length || ""}:${row.productSpec?.width || ""}:${row.productSpec?.thickness || ""}`))
+      .size,
     inventoryMovements: plan.movements.length,
     expenseEntries: plan.expenses.length,
   };
