@@ -1168,7 +1168,7 @@ async function previewSalesImport(req, res) {
     success: plan.errors.length === 0,
     message: plan.errors.length ? "Fix the workbook errors before importing" : "Sales workbook validated and ready to import",
     errors: plan.errors,
-    data: { preview: publicSalesImportPreview(plan) },
+    data: { preview: plan.errors.length ? null : publicSalesImportPreview(plan) },
   });
 }
 
@@ -1275,7 +1275,9 @@ async function importSales(req, res) {
       const before = await transaction.inventory.findUnique({ where: { productId } });
       const updated = await transaction.inventory.upsert({ where: { productId }, create: { productId, quantity: row.remainingInventory, reservedQuantity: 0 }, update: { quantity: row.remainingInventory, reservedQuantity: 0 } });
       const delta = row.remainingInventory - (before?.quantity || 0);
-      await transaction.inventoryMovement.create({ data: { productId, movementType: delta >= 0 ? "ADJUSTMENT_IN" : "ADJUSTMENT_OUT", quantityChange: delta, balanceAfter: updated.quantity, referenceType: "HISTORICAL_BALANCE_IMPORT", createdById: req.user.id, createdAt: row.saleDate, notes: `Opening balance ${row.openingBalance ?? "not recorded"}; current balance replaced from ${row.sourceSheet || "Excel"}` } });
+      if (delta !== 0) {
+        await transaction.inventoryMovement.create({ data: { productId, movementType: delta > 0 ? "ADJUSTMENT_IN" : "ADJUSTMENT_OUT", quantityChange: delta, balanceAfter: updated.quantity, referenceType: "HISTORICAL_BALANCE_IMPORT", createdById: req.user.id, createdAt: row.saleDate, notes: `Opening balance ${row.openingBalance ?? "not recorded"}; current balance replaced from ${row.sourceSheet || "Excel"}` } });
+      }
     }
 
     for (const movement of plan.movements) {
