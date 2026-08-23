@@ -1314,13 +1314,17 @@ async function importSales(req, res) {
 }
 
 async function downloadSalesImportTemplate(req, res) {
+  const templateVersion = "2";
   const products = await prisma.product.findMany({ where: { isActive: true }, include: { category: { select: { name: true } } }, orderBy: [{ name: "asc" }, { length: "desc" }] });
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "StockFlow";
+  workbook.title = `StockFlow Complete Operations Import Template v${templateVersion}`;
+  workbook.subject = "Sales, inventory balances, inventory history, payment destinations, and owner expense account import";
+  workbook.company = "StockFlow";
   workbook.created = new Date();
-  const sheet = workbook.addWorksheet("Sales Entry", { views: [{ state: "frozen", ySplit: 8 }] });
-  sheet.mergeCells("A1:T1"); sheet.getCell("A1").value = "STOCKFLOW SALES + INVENTORY IMPORT TEMPLATE";
-  sheet.mergeCells("A2:T2"); sheet.getCell("A2").value = "Supports summarized sales, customer credit, opening inventory, current inventory replacement, bank destinations, current prices, and source-sheet audit details.";
+  const sheet = workbook.addWorksheet("Sales Entry", { views: [{ state: "frozen", xSplit: 4, ySplit: 8, showGridLines: false }] });
+  sheet.mergeCells("A1:T1"); sheet.getCell("A1").value = `STOCKFLOW COMPLETE OPERATIONS IMPORT TEMPLATE · v${templateVersion}`;
+  sheet.mergeCells("A2:T2"); sheet.getCell("A2").value = "One workbook for historical sales, credit, opening and remaining inventory, bank destinations, prices, stock movements, and owner expenses.";
   sheet.mergeCells("A4:C4"); sheet.getCell("A4").value = "FULL SALE VALUE"; sheet.getCell("A5").value = { formula: "SUM(L9:L2008)", result: 0 };
   sheet.mergeCells("D4:F4"); sheet.getCell("D4").value = "AMOUNT RECEIVED"; sheet.getCell("D5").value = { formula: "SUM(M9:M2008)", result: 0 };
   sheet.mergeCells("G4:I4"); sheet.getCell("G4").value = "OUTSTANDING CREDIT"; sheet.getCell("G5").value = { formula: "SUM(N9:N2008)", result: 0 };
@@ -1338,13 +1342,17 @@ async function downloadSalesImportTemplate(req, res) {
     ["K", "L", "M", "N", "T"].forEach((column) => { sheet.getCell(`${column}${row}`).numFmt = '#,##0.00 "ETB"'; });
     sheet.getCell(`Q${row}`).numFmt = "@";
   }
+  sheet.getCell("C8").note = "Choose a product type from the Catalogue Guide dropdown, or type a new product type when importing a historical item that is not yet in StockFlow.";
+  sheet.getCell("D8").note = "Choose the exact product label from Catalogue Guide. StockFlow also accepts a new Product Type plus Length, Width, and Thickness for historical items.";
+  sheet.getCell("J8").note = "This becomes the current inventory quantity after the import is confirmed.";
+  sheet.getCell("P8").note = "For bank transfers, enter the bank or payment destination. If unknown, use Account not recorded.";
   sheet.getRow(1).height = 34;
   sheet.getRow(1).eachCell((cell) => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF111111" } }; cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 18 }; });
   sheet.getRow(8).eachCell((cell) => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF176B5B" } }; cell.font = { bold: true, color: { argb: "FFFFFFFF" } }; cell.alignment = { wrapText: true, vertical: "middle" }; });
   sheet.getRow(8).height = 30;
   sheet.autoFilter = { from: "A8", to: "T208" };
 
-  const history = workbook.addWorksheet("Inventory History", { views: [{ state: "frozen", ySplit: 5 }] });
+  const history = workbook.addWorksheet("Inventory History", { views: [{ state: "frozen", ySplit: 5, showGridLines: false }] });
   history.mergeCells("A1:H1"); history.getCell("A1").value = "HISTORICAL INVENTORY MOVEMENTS";
   history.mergeCells("A2:H2"); history.getCell("A2").value = "Use In for stock received and Out for stock sold or removed. These rows preserve history; the Sales Entry Remaining Inventory value controls current stock.";
   history.getRow(5).values = ["Date", "Product Type", "Material / Product", "Movement Type", "Quantity", "Balance After", "Note", "Source Sheet"];
@@ -1357,7 +1365,7 @@ async function downloadSalesImportTemplate(req, res) {
   }
   history.autoFilter = { from: "A5", to: "H505" };
 
-  const expense = workbook.addWorksheet("Owner Expense Account", { views: [{ state: "frozen", ySplit: 5 }] });
+  const expense = workbook.addWorksheet("Owner Expense Account", { views: [{ state: "frozen", ySplit: 5, showGridLines: false }] });
   expense.mergeCells("A1:E1"); expense.getCell("A1").value = "OWNER EXPENSE ACCOUNT";
   expense.mergeCells("A2:E2"); expense.getCell("A2").value = "In adds funds. Out records spending. StockFlow blocks Out when it exceeds the available balance. This account stays separate from profit.";
   expense.getRow(5).values = ["Date", "Entry Type", "Amount", "Note", "Source Sheet"];
@@ -1369,20 +1377,30 @@ async function downloadSalesImportTemplate(req, res) {
   }
   expense.autoFilter = { from: "A5", to: "E505" };
 
-  const recipients = workbook.addWorksheet("Recipient Destinations", { views: [{ state: "frozen", ySplit: 5 }] });
+  const recipients = workbook.addWorksheet("Recipient Destinations", { views: [{ state: "frozen", ySplit: 5, showGridLines: false }] });
   recipients.mergeCells("A1:D1"); recipients.getCell("A1").value = "PAYMENT RECIPIENT DESTINATIONS";
   recipients.mergeCells("A2:D2"); recipients.getCell("A2").value = "Reference list for bank accounts, people receiving funds, and Withold. Use Account not recorded until the real account number is available.";
   recipients.getRow(5).values = ["Destination Name", "Destination Type", "Account No.", "Notes"];
   recipients.columns = [{ width: 28 }, { width: 22 }, { width: 28 }, { width: 52 }];
   for (let row = 6; row <= 105; row += 1) recipients.getCell(`B${row}`).dataValidation = { type: "list", allowBlank: false, formulae: ['"Bank,Person,Withold"'] };
 
-  const guide = workbook.addWorksheet("Catalogue Guide", { views: [{ state: "frozen", ySplit: 1 }] });
+  const guide = workbook.addWorksheet("Catalogue Guide", { views: [{ state: "frozen", ySplit: 1, showGridLines: false }] });
   guide.columns = [{ header: "Product Type", key: "type", width: 22 }, { header: "Material / Product — paste this exact label", key: "label", width: 60 }, { header: "Available SKU", key: "sku", width: 28 }];
   products.forEach((product) => guide.addRow({ type: product.category?.name || product.name, label: productLabel(product), sku: product.sku }));
   guide.getRow(1).eachCell((cell) => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF111111" } }; cell.font = { bold: true, color: { argb: "FFFFFFFF" } }; });
-  const instructions = workbook.addWorksheet("Instructions");
+  guide.autoFilter = { from: "A1", to: `C${Math.max(guide.rowCount, 2)}` };
+  if (products.length) {
+    const guideEndRow = products.length + 1;
+    workbook.definedNames.add(`'Catalogue Guide'!$A$2:$A$${guideEndRow}`, "StockFlowProductTypes");
+    workbook.definedNames.add(`'Catalogue Guide'!$B$2:$B$${guideEndRow}`, "StockFlowProductLabels");
+    for (let row = 9; row <= 208; row += 1) {
+      sheet.getCell(`C${row}`).dataValidation = { type: "list", allowBlank: true, formulae: ["StockFlowProductTypes"], showErrorMessage: false };
+      sheet.getCell(`D${row}`).dataValidation = { type: "list", allowBlank: true, formulae: ["StockFlowProductLabels"], showErrorMessage: false };
+    }
+  }
+  const instructions = workbook.addWorksheet("Instructions", { views: [{ showGridLines: false }] });
   instructions.getColumn(1).width = 110;
-  ["STOCKFLOW HISTORICAL OPERATIONS IMPORT", "Keep every header unchanged.", "Material / Product must be an exact SKU or the full label from Catalogue Guide. Products match by type + length + width + thickness.", "Beginning Balance stores opening stock. Remaining Inventory replaces the product’s current quantity.", "Full Sale Value is Quantity Sold × Selling Price. Amount Received is what was paid. The difference becomes Outstanding Credit.", "Use Bank Transfer for paid historical rows. If the destination or account is missing, use Bank transfer and Account not recorded.", "Withold is received value and reduces outstanding credit.", "Inventory History preserves In and Out movements without changing the final current quantity set on Sales Entry.", "Owner Expense Account is separate from revenue and profit. In adds funds; Out spends funds and cannot exceed the available balance.", "Preview before importing. Importing the same workbook twice creates duplicate historical records."].forEach((text) => instructions.addRow([text]));
+  [`STOCKFLOW COMPLETE OPERATIONS IMPORT · TEMPLATE v${templateVersion}`, "Keep every header and sheet name unchanged.", "Sales Entry accepts the dropdown product label or a Product Type plus Length, Width, and Thickness for new historical items.", "Beginning Balance stores opening stock. Remaining Inventory replaces the product’s current quantity.", "Full Sale Value is Quantity Sold × Selling Price. Amount Received is what was paid. The difference becomes Outstanding Credit.", "Use Bank Transfer for paid historical rows. If the destination or account is missing, use Bank transfer and Account not recorded.", "Withold is received value and reduces outstanding credit.", "Inventory History preserves In and Out movements without changing the final current quantity set on Sales Entry.", "Owner Expense Account is separate from revenue and profit. In adds funds; Out spends funds and cannot exceed the available balance.", "Preview before importing. Importing the same workbook twice creates duplicate historical records."].forEach((text) => instructions.addRow([text]));
   instructions.getCell("A1").font = { bold: true, size: 16 };
 
   for (const worksheet of [history, expense, recipients]) {
@@ -1393,7 +1411,11 @@ async function downloadSalesImportTemplate(req, res) {
   }
   const buffer = await workbook.xlsx.writeBuffer();
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  res.setHeader("Content-Disposition", 'attachment; filename="stockflow-historical-operations-template.xlsx"');
+  res.setHeader("Content-Disposition", `attachment; filename="stockflow-complete-operations-template-v${templateVersion}.xlsx"`);
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, private");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("X-StockFlow-Template-Version", templateVersion);
   return res.send(Buffer.from(buffer));
 }
 
