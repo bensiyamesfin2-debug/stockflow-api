@@ -130,6 +130,7 @@ model User {
   stockTransfers       StockTransfer[]             @relation("TransfersCreated")
   quotations           Quotation[]                 @relation("QuotationsCreated")
   saleReturnsProcessed SaleReturn[]                @relation("SaleReturnsProcessed")
+  collectionActivities CreditCollectionActivity[]  @relation("CreditCollectionActivitiesCreated")
   twoFactorSecret      String?                     @map("two_factor_secret") @db.VarChar(128)
   twoFactorEnabled     Boolean                     @default(false) @map("two_factor_enabled")
   isPlatformOwner      Boolean                     @default(false) @map("is_platform_owner")
@@ -308,6 +309,7 @@ model Sale {
   releases           InventoryRelease[]
   notifications      Notification[]
   returns            SaleReturn[]
+  collectionActivities CreditCollectionActivity[]
   customer           Customer?          @relation(fields: [customerId], references: [id], onDelete: SetNull)
   discount           Discount?          @relation(fields: [discountId], references: [id], onDelete: SetNull)
   shift              Shift?             @relation(fields: [shiftId], references: [id], onDelete: SetNull)
@@ -693,6 +695,21 @@ model SaleReturnItem {
   @@index([saleItemId])
   @@index([locationId])
   @@map("sale_return_items")
+}
+
+model CreditCollectionActivity {
+  id           Int      @id @default(autoincrement())
+  saleId       Int      @map("sale_id")
+  activityType String   @map("activity_type") @db.VarChar(30)
+  channel      String   @db.VarChar(30)
+  note         String?
+  createdById  Int      @map("created_by_id")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  sale         Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  createdBy    User     @relation("CreditCollectionActivitiesCreated", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([saleId, createdAt])
+  @@map("credit_collection_activities")
 }
 
 model AuditLog {

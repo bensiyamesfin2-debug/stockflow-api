@@ -12,6 +12,10 @@ const {
   getDeadStockReport,
   getProfitLossReport,
   getValuationReport,
+  getCreditAgingReport,
+  getReorderAssistantReport,
+  getCustomerStatement,
+  recordCreditCollectionActivity,
 } = require("../controllers/reportController");
 const { authenticate, authorizeRoles } = require("../middleware/auth");
 
@@ -39,5 +43,9 @@ router.get("/top-selling", authenticate, authorizeRoles("ADMIN"), getTopSellingR
 router.get("/dead-stock", authenticate, authorizeRoles("ADMIN"), getDeadStockReport);
 router.get("/profit-loss", authenticate, authorizeRoles("ADMIN"), getProfitLossReport);
 router.get("/valuation", authenticate, authorizeRoles("ADMIN"), getValuationReport);
+router.get("/credit-aging", authenticate, authorizeRoles("ADMIN"), getCreditAgingReport);
+router.get("/reorder-assistant", authenticate, authorizeRoles("ADMIN"), getReorderAssistantReport);
+router.get("/customer-statements/:id", authenticate, authorizeRoles("ADMIN"), getCustomerStatement);
+router.post("/credit-collections", authenticate, authorizeRoles("ADMIN"), recordCreditCollectionActivity);
 
 module.exports = router;
