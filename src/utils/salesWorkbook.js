@@ -4,6 +4,7 @@ const JSZip = require("jszip");
 const HEADER_ALIASES = {
   date: ["date of sale", "sale date", "date"],
   customer: ["customer", "customer name", "client"],
+  salesperson: ["salesperson", "sales person", "sold by", "cashier"],
   productType: ["product type", "type", "category"],
   product: ["material product", "material / product", "product", "material", "product sku", "sku"],
   length: ["length", "length cm", "l"],
@@ -292,6 +293,7 @@ async function parseSalesWorkbook(buffer, products) {
       productSpec: resolved.product ? null : { name: fallbackName, ...fallbackMeasurement },
       productType: String(rawProductType || "").trim() || null,
       customerName: columns.customer ? String(cellText(row.getCell(columns.customer)) || "").trim().slice(0, 150) || null : null,
+      salesperson: columns.salesperson ? String(cellText(row.getCell(columns.salesperson)) || "").trim().slice(0, 150) || null : null,
       quantity,
       amountCents,
       unitPriceCents,

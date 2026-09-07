@@ -1139,6 +1139,7 @@ function publicSalesImportPreview(plan) {
       bankName: row.bankName,
       recipientAccount: row.recipientAccount,
       customerName: row.customerName,
+      salesperson: row.salesperson,
       amountReceived: centsToMoney(row.collectedCents),
       outstandingCredit: centsToMoney(row.creditBalanceCents),
       openingBalance: row.openingBalance,
@@ -1224,6 +1225,7 @@ async function importSales(req, res) {
         saleNumber,
         cashierId: req.user.id,
         customerName: row.customerName,
+        salespersonName: row.salesperson,
         shiftId: activeShift?.id || null,
         totalAmount: centsToMoney(row.amountCents),
         creditBalance: centsToMoney(row.creditBalanceCents),
@@ -1314,7 +1316,7 @@ async function importSales(req, res) {
 }
 
 async function downloadSalesImportTemplate(req, res) {
-  const templateVersion = "2";
+  const templateVersion = "3";
   const products = await prisma.product.findMany({ where: { isActive: true }, include: { category: { select: { name: true } } }, orderBy: [{ name: "asc" }, { length: "desc" }] });
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "StockFlow";
@@ -1323,34 +1325,36 @@ async function downloadSalesImportTemplate(req, res) {
   workbook.company = "StockFlow";
   workbook.created = new Date();
   const sheet = workbook.addWorksheet("Sales Entry", { views: [{ state: "frozen", xSplit: 4, ySplit: 8, showGridLines: false }] });
-  sheet.mergeCells("A1:T1"); sheet.getCell("A1").value = `STOCKFLOW COMPLETE OPERATIONS IMPORT TEMPLATE · v${templateVersion}`;
-  sheet.mergeCells("A2:T2"); sheet.getCell("A2").value = "One workbook for historical sales, credit, opening and remaining inventory, bank destinations, prices, stock movements, and owner expenses.";
+  sheet.mergeCells("A1:U1"); sheet.getCell("A1").value = `STOCKFLOW COMPLETE OPERATIONS IMPORT TEMPLATE · v${templateVersion}`;
+  sheet.mergeCells("A2:U2"); sheet.getCell("A2").value = "One workbook for historical sales, credit, opening and remaining inventory, bank destinations, prices, stock movements, and owner expenses.";
   sheet.mergeCells("A4:C4"); sheet.getCell("A4").value = "FULL SALE VALUE"; sheet.getCell("A5").value = { formula: "SUM(L9:L2008)", result: 0 };
   sheet.mergeCells("D4:F4"); sheet.getCell("D4").value = "AMOUNT RECEIVED"; sheet.getCell("D5").value = { formula: "SUM(M9:M2008)", result: 0 };
   sheet.mergeCells("G4:I4"); sheet.getCell("G4").value = "OUTSTANDING CREDIT"; sheet.getCell("G5").value = { formula: "SUM(N9:N2008)", result: 0 };
   sheet.mergeCells("J4:L4"); sheet.getCell("J4").value = "QUANTITY SOLD"; sheet.getCell("J5").value = { formula: "SUM(I9:I2008)", result: 0 };
-  sheet.mergeCells("A7:T7"); sheet.getCell("A7").value = "ONE PRODUCT + MEASUREMENT PER ROW — historical balances replace current inventory after confirmation";
-  const headers = ["Date of Sale", "Customer Name", "Product Type", "Material / Product", "Length", "Width", "Thickness", "Beginning Balance", "Quantity Sold", "Remaining Inventory", "Selling Price", "Full Sale Value", "Amount Received", "Outstanding Credit", "Payment Type", "Payment Destination", "Recipient Account No.", "Notes", "Source Sheet", "Current Selling Price"];
+  sheet.mergeCells("A7:U7"); sheet.getCell("A7").value = "ONE PRODUCT + MEASUREMENT PER ROW — historical balances replace current inventory after confirmation";
+  const headers = ["Date of Sale", "Customer Name", "Product Type", "Material / Product", "Length", "Width", "Thickness", "Beginning Balance", "Quantity Sold", "Remaining Inventory", "Selling Price", "Full Sale Value", "Amount Received", "Outstanding Credit", "Payment Type", "Payment Destination", "Recipient Account No.", "Notes", "Source Sheet", "Current Selling Price", "Salesperson"];
   sheet.getRow(8).values = headers;
-  sheet.columns = [{ width: 15 }, { width: 22 }, { width: 18 }, { width: 38 }, { width: 10 }, { width: 10 }, { width: 11 }, { width: 17 }, { width: 14 }, { width: 19 }, { width: 15 }, { width: 18 }, { width: 18 }, { width: 19 }, { width: 18 }, { width: 24 }, { width: 24 }, { width: 34 }, { width: 18 }, { width: 19 }];
+  sheet.columns = [{ width: 15 }, { width: 22 }, { width: 18 }, { width: 38 }, { width: 10 }, { width: 10 }, { width: 11 }, { width: 17 }, { width: 14 }, { width: 19 }, { width: 15 }, { width: 18 }, { width: 18 }, { width: 19 }, { width: 18 }, { width: 24 }, { width: 24 }, { width: 34 }, { width: 18 }, { width: 19 }, { width: 22 }];
   for (let row = 9; row <= 208; row += 1) {
     sheet.getCell(`O${row}`).dataValidation = { type: "list", allowBlank: false, formulae: ['"Bank Transfer,Credit,Cash,Mobile Money,Card,Payment details unknown"'] };
+    sheet.getCell(`P${row}`).dataValidation = { type: "list", allowBlank: true, formulae: ['"CBE,Awash Bank,Dashen Bank,Bank of Abyssinia,Telebirr,CBE Birr,M-Pesa,HelloCash,Account not recorded"'], showErrorMessage: false };
     sheet.getCell(`L${row}`).value = { formula: `IF(OR(I${row}="",K${row}=""),"",I${row}*K${row})`, result: "" };
     sheet.getCell(`N${row}`).value = { formula: `IF(L${row}="","",MAX(L${row}-IF(M${row}="",0,M${row}),0))`, result: "" };
     sheet.getCell(`A${row}`).numFmt = "yyyy-mm-dd";
     ["E", "F", "G", "H", "I", "J"].forEach((column) => { sheet.getCell(`${column}${row}`).numFmt = "0"; });
     ["K", "L", "M", "N", "T"].forEach((column) => { sheet.getCell(`${column}${row}`).numFmt = '#,##0.00 "ETB"'; });
-    sheet.getCell(`Q${row}`).numFmt = "@";
+    ["Q", "U"].forEach((column) => { sheet.getCell(`${column}${row}`).numFmt = "@"; });
   }
   sheet.getCell("C8").note = "Choose a product type from the Catalogue Guide dropdown, or type a new product type when importing a historical item that is not yet in StockFlow.";
   sheet.getCell("D8").note = "Choose the exact product label from Catalogue Guide. StockFlow also accepts a new Product Type plus Length, Width, and Thickness for historical items.";
   sheet.getCell("J8").note = "This becomes the current inventory quantity after the import is confirmed.";
-  sheet.getCell("P8").note = "For bank transfers, enter the bank or payment destination. If unknown, use Account not recorded.";
+  sheet.getCell("P8").note = "For bank transfers, enter the bank name. For Mobile Money, enter the provider (Telebirr, CBE Birr, M-Pesa, and so on). Pick a suggestion or type your own. If unknown, use Account not recorded.";
+  sheet.getCell("U8").note = "Optional — the staff member who made this sale. Leave blank if unknown.";
   sheet.getRow(1).height = 34;
   sheet.getRow(1).eachCell((cell) => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF111111" } }; cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 18 }; });
   sheet.getRow(8).eachCell((cell) => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF176B5B" } }; cell.font = { bold: true, color: { argb: "FFFFFFFF" } }; cell.alignment = { wrapText: true, vertical: "middle" }; });
   sheet.getRow(8).height = 30;
-  sheet.autoFilter = { from: "A8", to: "T208" };
+  sheet.autoFilter = { from: "A8", to: "U208" };
 
   const history = workbook.addWorksheet("Inventory History", { views: [{ state: "frozen", ySplit: 5, showGridLines: false }] });
   history.mergeCells("A1:H1"); history.getCell("A1").value = "HISTORICAL INVENTORY MOVEMENTS";
@@ -1400,7 +1404,7 @@ async function downloadSalesImportTemplate(req, res) {
   }
   const instructions = workbook.addWorksheet("Instructions", { views: [{ showGridLines: false }] });
   instructions.getColumn(1).width = 110;
-  [`STOCKFLOW COMPLETE OPERATIONS IMPORT · TEMPLATE v${templateVersion}`, "Keep every header and sheet name unchanged.", "Sales Entry accepts the dropdown product label or a Product Type plus Length, Width, and Thickness for new historical items.", "Beginning Balance stores opening stock. Remaining Inventory replaces the product’s current quantity.", "Full Sale Value is Quantity Sold × Selling Price. Amount Received is what was paid. The difference becomes Outstanding Credit.", "Use Bank Transfer for paid historical rows. If the destination or account is missing, use Bank transfer and Account not recorded.", "Withold is received value and reduces outstanding credit.", "Inventory History preserves In and Out movements without changing the final current quantity set on Sales Entry.", "Owner Expense Account is separate from revenue and profit. In adds funds; Out spends funds and cannot exceed the available balance.", "Preview before importing. Importing the same workbook twice creates duplicate historical records."].forEach((text) => instructions.addRow([text]));
+  [`STOCKFLOW COMPLETE OPERATIONS IMPORT · TEMPLATE v${templateVersion}`, "Keep every header and sheet name unchanged.", "Sales Entry accepts the dropdown product label or a Product Type plus Length, Width, and Thickness for new historical items.", "Beginning Balance stores opening stock. Remaining Inventory replaces the product’s current quantity.", "Full Sale Value is Quantity Sold × Selling Price. Amount Received is what was paid. The difference becomes Outstanding Credit.", "Use Bank Transfer for paid historical rows. If the destination or account is missing, use Bank transfer and Account not recorded.", "Payment Destination also records the Mobile Money provider (Telebirr, CBE Birr, M-Pesa, and so on) — pick a suggestion or type your own.", "Salesperson is optional and records which staff member made the sale.", "Withold is received value and reduces outstanding credit.", "Inventory History preserves In and Out movements without changing the final current quantity set on Sales Entry.", "Owner Expense Account is separate from revenue and profit. In adds funds; Out spends funds and cannot exceed the available balance.", "Preview before importing. Importing the same workbook twice creates duplicate historical records."].forEach((text) => instructions.addRow([text]));
   instructions.getCell("A1").font = { bold: true, size: 16 };
 
   for (const worksheet of [history, expense, recipients]) {

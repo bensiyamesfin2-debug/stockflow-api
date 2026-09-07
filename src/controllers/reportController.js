@@ -115,10 +115,12 @@ async function findAllById(model, args, batchSize = 2000) {
   }
 }
 
-async function adminDashboard() {
+const TREND_RANGE_DAYS = { WEEK: 7, MONTH: 30, QUARTER: 90 };
+
+async function adminDashboard(trendDays = 7) {
   const start = todayStart();
   const trendStart = new Date(start);
-  trendStart.setDate(trendStart.getDate() - 6);
+  trendStart.setDate(trendStart.getDate() - (trendDays - 1));
 
   const [
     todaySales,
@@ -181,7 +183,7 @@ async function adminDashboard() {
   }, 0n);
 
   const trend = [];
-  for (let offset = 0; offset < 7; offset += 1) {
+  for (let offset = 0; offset < trendDays; offset += 1) {
     const date = new Date(trendStart);
     date.setDate(date.getDate() + offset);
     const key = dayKey(date);
@@ -311,8 +313,9 @@ async function inventoryDashboard() {
 }
 
 async function getDashboard(req, res) {
+  const trendDays = TREND_RANGE_DAYS[String(req.query.range || "").toUpperCase()] || TREND_RANGE_DAYS.WEEK;
   let dashboard;
-  if (req.user.role === "ADMIN") dashboard = await adminDashboard();
+  if (req.user.role === "ADMIN") dashboard = await adminDashboard(trendDays);
   if (req.user.role === "CASHIER") dashboard = await cashierDashboard(req.user.id);
   if (req.user.role === "INVENTORY_STAFF") dashboard = await inventoryDashboard();
 

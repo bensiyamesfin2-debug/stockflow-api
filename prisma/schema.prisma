@@ -292,6 +292,7 @@ model Sale {
   discountId         Int?               @map("discount_id")
   shiftId            Int?               @map("shift_id")
   customerName       String?            @map("customer_name") @db.VarChar(150)
+  salespersonName    String?            @map("salesperson_name") @db.VarChar(150)
   discountAmount     Decimal            @default(0) @map("discount_amount") @db.Decimal(12, 2)
   totalAmount        Decimal            @map("total_amount") @db.Decimal(12, 2)
   creditBalance      Decimal            @default(0) @map("credit_balance") @db.Decimal(12, 2)
