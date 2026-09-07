@@ -993,6 +993,202 @@ async function getValuationReport(req, res) {
   });
 }
 
+const CREDIT_AGING_BUCKETS = ["CURRENT", "OVERDUE_1_30", "OVERDUE_31_60", "OVERDUE_61_90", "OVERDUE_90_PLUS"];
+
+function creditAgingBucket(daysOverdue) {
+  if (daysOverdue <= 0) return "CURRENT";
+  if (daysOverdue <= 30) return "OVERDUE_1_30";
+  if (daysOverdue <= 60) return "OVERDUE_31_60";
+  if (daysOverdue <= 90) return "OVERDUE_61_90";
+  return "OVERDUE_90_PLUS";
+}
+
+async function getCreditAgingReport(req, res) {
+  const sales = await prisma.sale.findMany({
+    where: { creditBalance: { gt: 0 }, status: { not: "CANCELLED" } },
+    select: {
+      id: true,
+      saleNumber: true,
+      creditBalance: true,
+      creditDueAt: true,
+      customerName: true,
+      customer: { select: { id: true, name: true, phone: true } },
+    },
+    orderBy: [{ creditDueAt: "asc" }, { createdAt: "asc" }],
+  });
+
+  const now = new Date();
+  const buckets = new Map(CREDIT_AGING_BUCKETS.map((bucket) => [bucket, { count: 0, amountCents: 0n }]));
+  const accounts = new Set();
+  let totalOutstandingCents = 0n;
+  let overdueCents = 0n;
+
+  const details = sales.map((sale) => {
+    const daysOverdue = sale.creditDueAt && sale.creditDueAt < now
+      ? Math.floor((now.getTime() - sale.creditDueAt.getTime()) / 86_400_000)
+      : 0;
+    const bucket = creditAgingBucket(daysOverdue);
+    const amountCents = moneyToCents(sale.creditBalance.toFixed(2));
+
+    buckets.get(bucket).count += 1;
+    buckets.get(bucket).amountCents += amountCents;
+    totalOutstandingCents += amountCents;
+    if (daysOverdue > 0) overdueCents += amountCents;
+    accounts.add(sale.customer ? `customer:${sale.customer.id}` : `walkin:${(sale.customerName || "").trim().toLowerCase()}`);
+
+    return {
+      id: sale.id,
+      saleNumber: sale.saleNumber,
+      customer: sale.customer
+        ? { id: sale.customer.id, name: sale.customer.name, phone: sale.customer.phone }
+        : { name: sale.customerName || "Walk-in customer", phone: null },
+      creditBalance: centsToMoney(amountCents),
+      creditDueAt: sale.creditDueAt,
+      daysOverdue,
+      bucket,
+    };
+  });
+
+  return res.json({
+    success: true,
+    data: {
+      metrics: {
+        accounts: accounts.size,
+        totalOutstanding: centsToMoney(totalOutstandingCents),
+        overdueAmount: centsToMoney(overdueCents),
+        overduePercent: percentage(overdueCents, totalOutstandingCents),
+      },
+      buckets: Object.fromEntries([...buckets].map(([bucket, value]) => [bucket, { count: value.count, amount: centsToMoney(value.amountCents) }])),
+      details,
+    },
+  });
+}
+
+// No per-supplier lead time is tracked yet, so every suggestion uses this conservative default.
+const DEFAULT_REORDER_LEAD_TIME_DAYS = 7;
+const REORDER_VELOCITY_WINDOW_DAYS = 60;
+
+async function getReorderAssistantReport(req, res) {
+  const velocityStart = new Date(Date.now() - REORDER_VELOCITY_WINDOW_DAYS * 86_400_000);
+  const [inventory, recentSaleItems, openOrderItems, purchaseHistory] = await Promise.all([
+    prisma.inventory.findMany({
+      include: { product: { select: { id: true, sku: true, name: true, length: true, width: true, thickness: true, isActive: true } } },
+    }),
+    prisma.saleItem.findMany({
+      where: { sale: { createdAt: { gte: velocityStart }, status: { not: "CANCELLED" } } },
+      select: { productId: true, quantity: true },
+    }),
+    prisma.purchaseOrderItem.findMany({
+      where: { purchaseOrder: { status: { in: ["ORDERED", "PARTIALLY_RECEIVED"] } } },
+      select: { productId: true, quantity: true, receivedQuantity: true },
+    }),
+    prisma.purchaseOrderItem.findMany({
+      where: { purchaseOrder: { status: { not: "CANCELLED" } } },
+      select: {
+        productId: true,
+        unitCost: true,
+        purchaseOrder: { select: { createdAt: true, supplier: { select: { id: true, name: true, contactName: true, phone: true, email: true, address: true, isActive: true } } } },
+      },
+      orderBy: { purchaseOrder: { createdAt: "desc" } },
+    }),
+  ]);
+
+  const soldByProduct = new Map();
+  for (const item of recentSaleItems) soldByProduct.set(item.productId, (soldByProduct.get(item.productId) || 0) + item.quantity);
+
+  const onOrderByProduct = new Map();
+  for (const item of openOrderItems) {
+    const remaining = Math.max(0, item.quantity - item.receivedQuantity);
+    onOrderByProduct.set(item.productId, (onOrderByProduct.get(item.productId) || 0) + remaining);
+  }
+
+  const latestPurchaseByProduct = new Map();
+  for (const item of purchaseHistory) {
+    if (latestPurchaseByProduct.has(item.productId)) continue;
+    latestPurchaseByProduct.set(item.productId, { supplier: item.purchaseOrder.supplier, unitCost: item.unitCost });
+  }
+
+  const alerts = buildLowStockAlerts(inventory.filter((record) => record.product.isActive));
+  const suggestions = alerts
+    .map((alert) => {
+      const soldUnits = soldByProduct.get(alert.productId) || 0;
+      const onOrder = onOrderByProduct.get(alert.productId) || 0;
+      const latestPurchase = latestPurchaseByProduct.get(alert.productId);
+      return {
+        product: { id: alert.productId, sku: alert.sku, name: alert.name, length: alert.length, width: alert.width, thickness: alert.thickness },
+        available: alert.availableQuantity,
+        soldUnits,
+        averageDailySales: Math.round((soldUnits / REORDER_VELOCITY_WINDOW_DAYS) * 10) / 10,
+        leadTimeDays: DEFAULT_REORDER_LEAD_TIME_DAYS,
+        onOrder,
+        suggestedQuantity: Math.max(0, alert.suggestedOrderQuantity - onOrder),
+        urgency: alert.severity,
+        preferredSupplier: latestPurchase?.supplier || null,
+        lastUnitCost: latestPurchase ? latestPurchase.unitCost.toFixed(2) : null,
+      };
+    })
+    .filter((item) => item.suggestedQuantity > 0)
+    .sort((left, right) => right.suggestedQuantity - left.suggestedQuantity);
+
+  return res.json({
+    success: true,
+    data: {
+      metrics: {
+        productsToOrder: suggestions.length,
+        suggestedUnits: suggestions.reduce((total, item) => total + item.suggestedQuantity, 0),
+        outOfStock: suggestions.filter((item) => item.urgency === "OUT_OF_STOCK").length,
+      },
+      suggestions,
+    },
+  });
+}
+
+async function getCustomerStatement(req, res) {
+  const customerId = Number(req.params.id);
+  if (!Number.isInteger(customerId)) throw new HttpError(400, "A valid customer id is required");
+  const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+  if (!customer) throw new HttpError(404, "Customer not found");
+  const sales = await prisma.sale.findMany({
+    where: { customerId, status: { not: "CANCELLED" } },
+    orderBy: { createdAt: "desc" },
+    take: 500,
+  });
+  const outstandingCents = sales.reduce((total, sale) => total + moneyToCents(sale.creditBalance.toFixed(2)), 0n);
+  return res.json({
+    success: true,
+    data: {
+      customer,
+      outstanding: centsToMoney(outstandingCents),
+      sales,
+    },
+  });
+}
+
+const CREDIT_COLLECTION_ACTIVITY_TYPES = ["REMINDER", "PROMISE_TO_PAY", "ESCALATION", "NOTE"];
+const CREDIT_COLLECTION_CHANNELS = ["WHATSAPP", "PHONE", "SMS", "EMAIL", "IN_PERSON"];
+
+async function recordCreditCollectionActivity(req, res) {
+  const { saleId, activityType, channel, note } = req.body || {};
+  const parsedSaleId = Number(saleId);
+  if (!Number.isInteger(parsedSaleId)) throw new HttpError(400, "A valid saleId is required");
+  const normalizedType = String(activityType || "").toUpperCase();
+  const normalizedChannel = String(channel || "").toUpperCase();
+  if (!CREDIT_COLLECTION_ACTIVITY_TYPES.includes(normalizedType)) throw new HttpError(400, `activityType must be one of ${CREDIT_COLLECTION_ACTIVITY_TYPES.join(", ")}`);
+  if (!CREDIT_COLLECTION_CHANNELS.includes(normalizedChannel)) throw new HttpError(400, `channel must be one of ${CREDIT_COLLECTION_CHANNELS.join(", ")}`);
+  const sale = await prisma.sale.findUnique({ where: { id: parsedSaleId }, select: { id: true, saleNumber: true } });
+  if (!sale) throw new HttpError(404, "Sale not found");
+  await prisma.creditCollectionActivity.create({
+    data: {
+      saleId: sale.id,
+      activityType: normalizedType,
+      channel: normalizedChannel,
+      note: note ? String(note).trim().slice(0, 2000) : null,
+      createdById: req.user.id,
+    },
+  });
+  return res.status(201).json({ success: true, message: `Collection activity recorded for ${sale.saleNumber}` });
+}
+
 module.exports = {
   getDashboard,
   getLiveSalesSummary,
@@ -1006,4 +1202,8 @@ module.exports = {
   getDeadStockReport,
   getProfitLossReport,
   getValuationReport,
+  getCreditAgingReport,
+  getReorderAssistantReport,
+  getCustomerStatement,
+  recordCreditCollectionActivity,
 };
