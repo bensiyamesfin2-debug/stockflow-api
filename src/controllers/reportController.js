@@ -115,10 +115,12 @@ async function findAllById(model, args, batchSize = 2000) {
   }
 }
 
-async function adminDashboard() {
+const TREND_RANGE_DAYS = { WEEK: 7, MONTH: 30, QUARTER: 90 };
+
+async function adminDashboard(trendDays = 7) {
   const start = todayStart();
   const trendStart = new Date(start);
-  trendStart.setDate(trendStart.getDate() - 6);
+  trendStart.setDate(trendStart.getDate() - (trendDays - 1));
 
   const [
     todaySales,
@@ -181,7 +183,7 @@ async function adminDashboard() {
   }, 0n);
 
   const trend = [];
-  for (let offset = 0; offset < 7; offset += 1) {
+  for (let offset = 0; offset < trendDays; offset += 1) {
     const date = new Date(trendStart);
     date.setDate(date.getDate() + offset);
     const key = dayKey(date);
@@ -250,8 +252,11 @@ async function cashierDashboard(userId) {
   };
 }
 
-async function inventoryDashboard() {
-  const [pendingSales, inventory, recentReceipts, recentReleases] = await Promise.all([
+async function inventoryDashboard(trendDays = 7) {
+  const start = todayStart();
+  const trendStart = new Date(start);
+  trendStart.setDate(trendStart.getDate() - (trendDays - 1));
+  const [pendingSales, inventory, recentReceipts, recentReleases, trendMovements] = await Promise.all([
     prisma.sale.findMany({
       where: { status: { in: ["PENDING_RELEASE", "PARTIALLY_RELEASED"] } },
       include: { items: { select: { quantity: true, releasedQuantity: true } } },
@@ -285,6 +290,10 @@ async function inventoryDashboard() {
       },
       orderBy: { createdAt: "desc" },
     }),
+    prisma.inventoryMovement.findMany({
+      where: { createdAt: { gte: trendStart } },
+      select: { createdAt: true, quantityChange: true, product: { select: { costPrice: true } } },
+    }),
   ]);
   const lowStock = buildLowStockAlerts(inventory);
   const pendingUnits = pendingSales.reduce(
@@ -297,6 +306,19 @@ async function inventoryDashboard() {
     0
   );
 
+  const trend = [];
+  for (let offset = 0; offset < trendDays; offset += 1) {
+    const date = new Date(trendStart);
+    date.setDate(date.getDate() + offset);
+    const key = dayKey(date);
+    const matching = trendMovements.filter((movement) => dayKey(movement.createdAt) === key);
+    const valueCents = matching.reduce((total, movement) => {
+      if (!movement.product.costPrice) return total;
+      return total + moneyToCents(movement.product.costPrice.toFixed(2)) * BigInt(movement.quantityChange);
+    }, 0n);
+    trend.push({ date: key, sales: matching.length, revenue: centsToMoney(valueCents) });
+  }
+
   return {
     role: "INVENTORY_STAFF",
     metrics: {
@@ -305,16 +327,18 @@ async function inventoryDashboard() {
       lowStockProducts: lowStock.length,
       physicalUnits: inventory.reduce((total, record) => total + record.quantity, 0),
     },
+    trend,
     recentReceipts,
     recentReleases,
   };
 }
 
 async function getDashboard(req, res) {
+  const trendDays = TREND_RANGE_DAYS[String(req.query.range || "").toUpperCase()] || TREND_RANGE_DAYS.WEEK;
   let dashboard;
-  if (req.user.role === "ADMIN") dashboard = await adminDashboard();
+  if (req.user.role === "ADMIN") dashboard = await adminDashboard(trendDays);
   if (req.user.role === "CASHIER") dashboard = await cashierDashboard(req.user.id);
-  if (req.user.role === "INVENTORY_STAFF") dashboard = await inventoryDashboard();
+  if (req.user.role === "INVENTORY_STAFF") dashboard = await inventoryDashboard(trendDays);
 
   return res.json({ success: true, data: { dashboard } });
 }
@@ -1064,13 +1088,32 @@ async function getCreditAgingReport(req, res) {
   });
 }
 
-// No per-supplier lead time is tracked yet, so every suggestion uses this conservative default.
+// Used only when a supplier has no receipt history yet to compute a real lead time from.
 const DEFAULT_REORDER_LEAD_TIME_DAYS = 7;
 const REORDER_VELOCITY_WINDOW_DAYS = 60;
 
+async function supplierLeadTimeDays() {
+  const ordersWithReceipts = await prisma.purchaseOrder.findMany({
+    where: { status: { not: "CANCELLED" }, receipts: { some: {} } },
+    select: { supplierId: true, createdAt: true, receipts: { select: { createdAt: true }, orderBy: { createdAt: "asc" }, take: 1 } },
+  });
+  const totals = new Map();
+  for (const order of ordersWithReceipts) {
+    const firstReceipt = order.receipts[0];
+    if (!firstReceipt) continue;
+    const days = Math.round((firstReceipt.createdAt.getTime() - order.createdAt.getTime()) / 86_400_000);
+    if (days < 0 || days > 180) continue;
+    const current = totals.get(order.supplierId) || { totalDays: 0, count: 0 };
+    current.totalDays += days;
+    current.count += 1;
+    totals.set(order.supplierId, current);
+  }
+  return new Map([...totals].map(([supplierId, { totalDays, count }]) => [supplierId, Math.max(1, Math.round(totalDays / count))]));
+}
+
 async function getReorderAssistantReport(req, res) {
   const velocityStart = new Date(Date.now() - REORDER_VELOCITY_WINDOW_DAYS * 86_400_000);
-  const [inventory, recentSaleItems, openOrderItems, purchaseHistory] = await Promise.all([
+  const [inventory, recentSaleItems, openOrderItems, purchaseHistory, leadTimeBySupplier] = await Promise.all([
     prisma.inventory.findMany({
       include: { product: { select: { id: true, sku: true, name: true, length: true, width: true, thickness: true, isActive: true } } },
     }),
@@ -1091,6 +1134,7 @@ async function getReorderAssistantReport(req, res) {
       },
       orderBy: { purchaseOrder: { createdAt: "desc" } },
     }),
+    supplierLeadTimeDays(),
   ]);
 
   const soldByProduct = new Map();
@@ -1119,7 +1163,7 @@ async function getReorderAssistantReport(req, res) {
         available: alert.availableQuantity,
         soldUnits,
         averageDailySales: Math.round((soldUnits / REORDER_VELOCITY_WINDOW_DAYS) * 10) / 10,
-        leadTimeDays: DEFAULT_REORDER_LEAD_TIME_DAYS,
+        leadTimeDays: (latestPurchase?.supplier && leadTimeBySupplier.get(latestPurchase.supplier.id)) || DEFAULT_REORDER_LEAD_TIME_DAYS,
         onOrder,
         suggestedQuantity: Math.max(0, alert.suggestedOrderQuantity - onOrder),
         urgency: alert.severity,

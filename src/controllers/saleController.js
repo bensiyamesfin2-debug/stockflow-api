@@ -1,4 +1,4 @@
-const { randomUUID } = require("crypto");
+const { randomUUID, createHash } = require("crypto");
 const ExcelJS = require("exceljs");
 const prisma = require("../config/prisma");
 const HttpError = require("../utils/HttpError");
@@ -1162,19 +1162,34 @@ function publicSalesImportPreview(plan) {
   };
 }
 
+function hashWorkbookBuffer(buffer) {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
+function serializeImportBatchSummary(batch) {
+  return { id: batch.id, fileName: batch.fileName, createdAt: batch.createdAt, summary: batch.summary };
+}
+
 async function previewSalesImport(req, res) {
   const plan = await salesImportPlan(req.body);
+  const duplicateBatch = plan.errors.length ? null : await prisma.salesImportBatch.findUnique({ where: { fileHash: hashWorkbookBuffer(req.body) } });
   return res.status(plan.errors.length ? 400 : 200).json({
     success: plan.errors.length === 0,
     message: plan.errors.length ? "Fix the workbook errors before importing" : "Sales workbook validated and ready to import",
     errors: plan.errors,
-    data: { preview: plan.errors.length ? null : publicSalesImportPreview(plan) },
+    data: { preview: plan.errors.length ? null : { ...publicSalesImportPreview(plan), duplicate: duplicateBatch ? serializeImportBatchSummary(duplicateBatch) : null } },
   });
 }
 
 async function importSales(req, res) {
   const plan = await salesImportPlan(req.body);
   if (plan.errors.length) return res.status(400).json({ success: false, message: "Fix the workbook errors before importing", errors: plan.errors });
+
+  const fileHash = hashWorkbookBuffer(req.body);
+  const duplicateBatch = await prisma.salesImportBatch.findUnique({ where: { fileHash } });
+  if (duplicateBatch) throw new HttpError(409, `This workbook was already imported in batch #${duplicateBatch.id}`);
+  const fileNameHeader = req.get("X-File-Name");
+  const fileName = fileNameHeader ? decodeURIComponent(fileNameHeader).slice(0, 255) : null;
 
   const counts = await runSerializableTransaction(async (transaction) => {
     const createdProducts = new Map();
@@ -1306,11 +1321,25 @@ async function importSales(req, res) {
       saleIds: createdIds,
     };
     await transaction.auditLog.create({ data: { userId: req.user.id, action: "IMPORT_SALES_WORKBOOK", entityType: "SALE", details: result } });
+    try {
+      await transaction.salesImportBatch.create({ data: { fileName, fileHash, summary: { sales: result.sales, units: result.units, amount: result.amount }, createdById: req.user.id } });
+    } catch (error) {
+      if (error.code === "P2002") throw new HttpError(409, "This workbook was already imported");
+      throw error;
+    }
     return result;
   }, 1, { maxWait: 15_000, timeout: 120_000 });
 
   const releaseCount = counts.sales - counts.legacySales;
   return res.status(201).json({ success: true, message: `${counts.sales} sales imported; ${counts.inventoryReplacements} inventory balances replaced; ${counts.expenseEntries} expense-account entries added${releaseCount ? `; ${releaseCount} current sales sent to warehouse release` : ""}`, data: { counts } });
+}
+
+async function listSalesImportBatches(req, res) {
+  const batches = await prisma.salesImportBatch.findMany({ orderBy: { createdAt: "desc" }, take: 100 });
+  return res.json({
+    success: true,
+    data: { batches: batches.map((batch) => ({ id: batch.id, fileName: batch.fileName, status: "IMPORTED", summary: batch.summary, createdAt: batch.createdAt, rolledBackAt: null })) },
+  });
 }
 
 async function downloadSalesImportTemplate(req, res) {
@@ -1429,6 +1458,7 @@ module.exports = {
   returnSale,
   previewSalesImport,
   importSales,
+  listSalesImportBatches,
   downloadSalesImportTemplate,
   salesImportPlan,
   validateSaleRequest,

@@ -131,6 +131,7 @@ model User {
   quotations           Quotation[]                 @relation("QuotationsCreated")
   saleReturnsProcessed SaleReturn[]                @relation("SaleReturnsProcessed")
   collectionActivities CreditCollectionActivity[]  @relation("CreditCollectionActivitiesCreated")
+  salesImportBatches   SalesImportBatch[]          @relation("SalesImportBatchesCreated")
   twoFactorSecret      String?                     @map("two_factor_secret") @db.VarChar(128)
   twoFactorEnabled     Boolean                     @default(false) @map("two_factor_enabled")
   isPlatformOwner      Boolean                     @default(false) @map("is_platform_owner")
@@ -710,6 +711,18 @@ model CreditCollectionActivity {
 
   @@index([saleId, createdAt])
   @@map("credit_collection_activities")
+}
+
+model SalesImportBatch {
+  id          Int      @id @default(autoincrement())
+  fileName    String?  @map("file_name") @db.VarChar(255)
+  fileHash    String   @unique @map("file_hash") @db.VarChar(64)
+  summary     Json
+  createdById Int      @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  createdBy   User     @relation("SalesImportBatchesCreated", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@map("sales_import_batches")
 }
 
 model AuditLog {
