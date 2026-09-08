@@ -5,7 +5,7 @@ const { authenticate, authorizeRoles } = require("../middleware/auth");
 const router = express.Router();
 router.use(authenticate);
 router.get("/", authorizeRoles("ADMIN", "CASHIER"), listPriceLists);
-router.post("/", authorizeRoles("ADMIN"), createPriceList);
-router.patch("/:id", authorizeRoles("ADMIN"), updatePriceList);
+router.post("/", authorizeRoles("ADMIN", "CASHIER"), createPriceList);
+router.patch("/:id", authorizeRoles("ADMIN", "CASHIER"), updatePriceList);
 
 module.exports = router;
