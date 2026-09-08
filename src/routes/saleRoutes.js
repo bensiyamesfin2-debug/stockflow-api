@@ -10,6 +10,7 @@ const {
   previewSalesImport,
   importSales,
   listSalesImportBatches,
+  rollbackSalesImport,
   downloadSalesImportTemplate,
 } = require("../controllers/saleController");
 const { authenticate, authorizeRoles } = require("../middleware/auth");
@@ -22,6 +23,7 @@ router.get("/import/template", authorizeRoles("ADMIN", "CASHIER"), downloadSales
 router.post("/import/preview", authorizeRoles("ADMIN", "CASHIER"), express.raw({ type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", limit: "8mb" }), previewSalesImport);
 router.post("/import", authorizeRoles("ADMIN", "CASHIER"), express.raw({ type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", limit: "8mb" }), importSales);
 router.get("/import/batches", authorizeRoles("ADMIN"), listSalesImportBatches);
+router.post("/import/batches/:id/rollback", authorizeRoles("ADMIN"), rollbackSalesImport);
 router.post("/", authorizeRoles("ADMIN", "CASHIER"), createSale);
 router.patch("/:id", authorizeRoles("ADMIN", "CASHIER"), updateSale);
 router.post("/:id/payments", authorizeRoles("ADMIN", "CASHIER"), recordCreditPayment);

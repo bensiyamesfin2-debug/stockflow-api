@@ -1207,7 +1207,12 @@ async function importSales(req, res) {
     }
     const currentPrices = new Map();
     for (const row of plan.rows) if (row.currentSellingPriceCents !== null) currentPrices.set(row.product.id, row.currentSellingPriceCents);
-    for (const [productId, priceCents] of currentPrices) await transaction.product.update({ where: { id: productId }, data: { sellingPrice: centsToMoney(priceCents) } });
+    const priceChanges = [];
+    for (const [productId, priceCents] of currentPrices) {
+      const before = await transaction.product.findUnique({ where: { id: productId }, select: { sellingPrice: true } });
+      await transaction.product.update({ where: { id: productId }, data: { sellingPrice: centsToMoney(priceCents) } });
+      priceChanges.push({ productId, previousPriceCents: moneyToCents(before.sellingPrice).toString(), newPriceCents: priceCents.toString() });
+    }
     const productIds = [...new Set(plan.rows.map((row) => row.product.id))];
     const products = await transaction.product.findMany({ where: { id: { in: productIds }, isActive: true }, include: { inventory: true } });
     const productById = new Map(products.map((product) => [product.id, product]));
@@ -1227,6 +1232,7 @@ async function importSales(req, res) {
       transaction.user.findMany({ where: { role: "INVENTORY_STAFF", isActive: true }, select: { id: true } }),
     ]);
     const createdIds = [];
+    const saleManifest = [];
     for (const row of plan.rows) {
       const product = productById.get(row.product.id);
       const credit = row.creditBalanceCents > 0n;
@@ -1235,6 +1241,7 @@ async function importSales(req, res) {
       const baseUnitPriceCents = row.amountCents / quantity;
       const higherPriceQuantity = Number(row.amountCents % quantity);
       const saleNumber = makeSaleNumber(row.saleDate);
+      const saleStatus = legacy ? "COMPLETED" : "PENDING_RELEASE";
       const sale = await transaction.sale.create({ data: {
         saleNumber,
         cashierId: req.user.id,
@@ -1242,7 +1249,7 @@ async function importSales(req, res) {
         shiftId: activeShift?.id || null,
         totalAmount: centsToMoney(row.amountCents),
         creditBalance: centsToMoney(row.creditBalanceCents),
-        status: legacy ? "COMPLETED" : "PENDING_RELEASE",
+        status: saleStatus,
         completedAt: legacy ? row.saleDate : null,
         createdAt: row.saleDate,
       } });
@@ -1261,8 +1268,9 @@ async function importSales(req, res) {
         } });
       }
       if (!legacy) await transaction.inventory.update({ where: { productId: product.id }, data: { reservedQuantity: { increment: row.quantity } } });
+      let payment = null;
       if (row.collectedCents > 0n && row.paymentMethod !== "LEGACY_UNKNOWN" && row.paymentMethod !== "CREDIT") {
-        await transaction.payment.create({ data: {
+        payment = await transaction.payment.create({ data: {
           saleId: sale.id,
           paymentMethod: row.paymentMethod,
           amount: centsToMoney(row.collectedCents),
@@ -1273,6 +1281,7 @@ async function importSales(req, res) {
           createdAt: row.saleDate,
         } });
       }
+      saleManifest.push({ id: sale.id, saleNumber, status: saleStatus, legacy, productId: product.id, quantity: row.quantity, paymentId: payment?.id ?? null });
       if (!legacy && inventoryStaff.length) {
         const notification = buildSaleNotification({ saleNumber, customerName: null, items: [{ quantity: row.quantity }] });
         await transaction.notification.createMany({ data: inventoryStaff.map((staff) => ({ userId: staff.id, saleId: sale.id, ...notification })) });
@@ -1280,6 +1289,8 @@ async function importSales(req, res) {
       createdIds.push(sale.id);
     }
 
+    const inventoryReplacements = [];
+    const inventoryMovementIds = [];
     const replacementByProduct = new Map();
     for (const row of plan.rows) {
       if (row.remainingInventory === null) continue;
@@ -1290,21 +1301,30 @@ async function importSales(req, res) {
       const before = await transaction.inventory.findUnique({ where: { productId } });
       const updated = await transaction.inventory.upsert({ where: { productId }, create: { productId, quantity: row.remainingInventory, reservedQuantity: 0 }, update: { quantity: row.remainingInventory, reservedQuantity: 0 } });
       const delta = row.remainingInventory - (before?.quantity || 0);
+      // Use the inventory snapshot from before this import's sale rows started reserving stock (not the
+      // state right before this replacement), so rollback restores the true pre-import baseline rather than
+      // an intermediate value that still counts a same-batch reservation this rollback is also undoing.
+      const baseline = productById.get(productId)?.inventory;
+      inventoryReplacements.push({ productId, previousQuantity: baseline?.quantity ?? before?.quantity ?? 0, previousReservedQuantity: baseline?.reservedQuantity ?? before?.reservedQuantity ?? 0, newQuantity: updated.quantity, newReservedQuantity: updated.reservedQuantity });
       if (delta !== 0) {
-        await transaction.inventoryMovement.create({ data: { productId, movementType: delta > 0 ? "ADJUSTMENT_IN" : "ADJUSTMENT_OUT", quantityChange: delta, balanceAfter: updated.quantity, referenceType: "HISTORICAL_BALANCE_IMPORT", createdById: req.user.id, createdAt: row.saleDate, notes: `Opening balance ${row.openingBalance ?? "not recorded"}; current balance replaced from ${row.sourceSheet || "Excel"}` } });
+        const movement = await transaction.inventoryMovement.create({ data: { productId, movementType: delta > 0 ? "ADJUSTMENT_IN" : "ADJUSTMENT_OUT", quantityChange: delta, balanceAfter: updated.quantity, referenceType: "HISTORICAL_BALANCE_IMPORT", createdById: req.user.id, createdAt: row.saleDate, notes: `Opening balance ${row.openingBalance ?? "not recorded"}; current balance replaced from ${row.sourceSheet || "Excel"}` } });
+        inventoryMovementIds.push(movement.id);
       }
     }
 
     for (const movement of plan.movements) {
       const inventory = await transaction.inventory.findUnique({ where: { productId: movement.product.id } });
-      await transaction.inventoryMovement.create({ data: { productId: movement.product.id, movementType: movement.movementType, quantityChange: movement.movementType === "STOCK_IN" ? movement.quantity : -movement.quantity, balanceAfter: movement.balanceAfter ?? inventory?.quantity ?? 0, referenceType: "LEGACY_INVENTORY_HISTORY", createdById: req.user.id, createdAt: movement.transactionDate, notes: movement.notes } });
+      const created = await transaction.inventoryMovement.create({ data: { productId: movement.product.id, movementType: movement.movementType, quantityChange: movement.movementType === "STOCK_IN" ? movement.quantity : -movement.quantity, balanceAfter: movement.balanceAfter ?? inventory?.quantity ?? 0, referenceType: "LEGACY_INVENTORY_HISTORY", createdById: req.user.id, createdAt: movement.transactionDate, notes: movement.notes } });
+      inventoryMovementIds.push(created.id);
     }
 
+    const ownerExpenseEntryIds = [];
     let expenseBalance = await currentBalanceCents(transaction);
     for (const expense of [...plan.expenses].sort((left, right) => left.transactionDate - right.transactionDate || left.rowNumber - right.rowNumber)) {
       if (expense.entryType === "OUT" && expense.amountCents > expenseBalance) throw new HttpError(409, `Owner Expense Account row ${expense.rowNumber} spends more than the available balance`);
       expenseBalance = expense.entryType === "IN" ? expenseBalance + expense.amountCents : expenseBalance - expense.amountCents;
-      await transaction.ownerExpenseEntry.create({ data: { entryType: expense.entryType, amount: centsToMoney(expense.amountCents), balanceAfter: centsToMoney(expenseBalance), note: expense.note, transactionDate: expense.transactionDate, createdById: req.user.id } });
+      const entry = await transaction.ownerExpenseEntry.create({ data: { entryType: expense.entryType, amount: centsToMoney(expense.amountCents), balanceAfter: centsToMoney(expenseBalance), note: expense.note, transactionDate: expense.transactionDate, createdById: req.user.id } });
+      ownerExpenseEntryIds.push(entry.id);
     }
     const result = {
       sales: plan.rows.length,
@@ -1320,9 +1340,10 @@ async function importSales(req, res) {
       pricesUpdated: currentPrices.size,
       saleIds: createdIds,
     };
+    const manifest = { saleManifest, priceChanges, inventoryReplacements, inventoryMovementIds, ownerExpenseEntryIds };
     await transaction.auditLog.create({ data: { userId: req.user.id, action: "IMPORT_SALES_WORKBOOK", entityType: "SALE", details: result } });
     try {
-      await transaction.salesImportBatch.create({ data: { fileName, fileHash, summary: { sales: result.sales, units: result.units, amount: result.amount }, createdById: req.user.id } });
+      await transaction.salesImportBatch.create({ data: { fileName, fileHash, summary: { sales: result.sales, units: result.units, amount: result.amount }, manifest, createdById: req.user.id } });
     } catch (error) {
       if (error.code === "P2002") throw new HttpError(409, "This workbook was already imported");
       throw error;
@@ -1336,9 +1357,111 @@ async function importSales(req, res) {
 
 async function listSalesImportBatches(req, res) {
   const batches = await prisma.salesImportBatch.findMany({ orderBy: { createdAt: "desc" }, take: 100 });
+  const mostRecentActive = batches.find((batch) => !batch.rolledBackAt);
   return res.json({
     success: true,
-    data: { batches: batches.map((batch) => ({ id: batch.id, fileName: batch.fileName, status: "IMPORTED", summary: batch.summary, createdAt: batch.createdAt, rolledBackAt: null })) },
+    data: {
+      batches: batches.map((batch) => ({
+        id: batch.id,
+        fileName: batch.fileName,
+        status: batch.rolledBackAt ? "ROLLED_BACK" : "IMPORTED",
+        summary: batch.summary,
+        createdAt: batch.createdAt,
+        rolledBackAt: batch.rolledBackAt,
+        canRollback: !batch.rolledBackAt && Boolean(batch.manifest) && batch.id === mostRecentActive?.id,
+      })),
+    },
+  });
+}
+
+async function rollbackSalesImport(req, res) {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ success: false, message: "Invalid import batch ID" });
+
+  const outcome = await runSerializableTransaction(async (transaction) => {
+    const batch = await transaction.salesImportBatch.findUnique({ where: { id } });
+    if (!batch) throw new HttpError(404, "Import batch not found");
+    if (batch.rolledBackAt) throw new HttpError(409, "This import was already rolled back");
+    if (!batch.manifest) throw new HttpError(409, "This import was recorded before rollback support existed and cannot be undone automatically");
+
+    const laterActiveBatch = await transaction.salesImportBatch.findFirst({ where: { id: { gt: id }, rolledBackAt: null }, orderBy: { id: "asc" } });
+    if (laterActiveBatch) throw new HttpError(409, `Roll back import #${laterActiveBatch.id} first — imports must be undone most-recent-first`);
+
+    const manifest = batch.manifest;
+    const saleIds = manifest.saleManifest.map((entry) => entry.id);
+    const sales = await transaction.sale.findMany({
+      where: { id: { in: saleIds } },
+      include: { payments: true, releases: true, returns: true, collectionActivities: true },
+    });
+    const saleById = new Map(sales.map((sale) => [sale.id, sale]));
+
+    for (const entry of manifest.saleManifest) {
+      const sale = saleById.get(entry.id);
+      if (!sale) continue;
+      if (sale.status !== entry.status) throw new HttpError(409, `Sale ${sale.saleNumber} has changed since import (now ${sale.status}) — can't roll back safely`);
+      if (sale.releases.length) throw new HttpError(409, `Sale ${sale.saleNumber} has already been released from the warehouse — can't roll back safely`);
+      if (sale.returns.length) throw new HttpError(409, `Sale ${sale.saleNumber} has a return recorded — can't roll back safely`);
+      if (sale.collectionActivities.length) throw new HttpError(409, `Sale ${sale.saleNumber} has credit collection activity recorded — can't roll back safely`);
+      const expectedPayments = entry.paymentId ? 1 : 0;
+      if (sale.payments.length !== expectedPayments) throw new HttpError(409, `Sale ${sale.saleNumber} has payments recorded since import — can't roll back safely`);
+    }
+
+    const replacedProductIds = new Set((manifest.inventoryReplacements || []).map((replacement) => replacement.productId));
+    const reservedDeltaByProduct = new Map();
+    for (const entry of manifest.saleManifest) {
+      if (entry.legacy || !saleById.has(entry.id) || replacedProductIds.has(entry.productId)) continue;
+      reservedDeltaByProduct.set(entry.productId, (reservedDeltaByProduct.get(entry.productId) || 0) + entry.quantity);
+    }
+    for (const [productId, quantity] of reservedDeltaByProduct) {
+      await transaction.inventory.update({ where: { productId }, data: { reservedQuantity: { decrement: quantity } } });
+    }
+
+    const presentSaleIds = [...saleById.keys()];
+    if (presentSaleIds.length) {
+      await transaction.payment.deleteMany({ where: { saleId: { in: presentSaleIds } } });
+      await transaction.notification.deleteMany({ where: { saleId: { in: presentSaleIds } } });
+      await transaction.sale.deleteMany({ where: { id: { in: presentSaleIds } } });
+    }
+
+    for (const replacement of manifest.inventoryReplacements || []) {
+      const current = await transaction.inventory.findUnique({ where: { productId: replacement.productId }, include: { product: { select: { name: true } } } });
+      if (!current) continue;
+      if (replacement.newQuantity !== undefined && (current.quantity !== replacement.newQuantity || current.reservedQuantity !== replacement.newReservedQuantity)) {
+        throw new HttpError(409, `${current.product.name}'s inventory changed since import — can't roll back its balance safely`);
+      }
+      await transaction.inventory.update({ where: { productId: replacement.productId }, data: { quantity: replacement.previousQuantity, reservedQuantity: replacement.previousReservedQuantity } });
+    }
+    if (manifest.inventoryMovementIds?.length) {
+      await transaction.inventoryMovement.deleteMany({ where: { id: { in: manifest.inventoryMovementIds } } });
+    }
+
+    for (const change of manifest.priceChanges || []) {
+      const product = await transaction.product.findUnique({ where: { id: change.productId }, select: { sellingPrice: true } });
+      if (!product) continue;
+      const currentCents = moneyToCents(product.sellingPrice);
+      if (currentCents !== null && currentCents.toString() === change.newPriceCents) {
+        await transaction.product.update({ where: { id: change.productId }, data: { sellingPrice: centsToMoney(BigInt(change.previousPriceCents)) } });
+      }
+    }
+
+    let expenseEntriesRemoved = 0;
+    if (manifest.ownerExpenseEntryIds?.length) {
+      const maxImportedId = Math.max(...manifest.ownerExpenseEntryIds);
+      const laterEntry = await transaction.ownerExpenseEntry.findFirst({ where: { id: { gt: maxImportedId } } });
+      if (laterEntry) throw new HttpError(409, "Later expense-account entries exist — can't roll back this import's expense entries safely");
+      const deleted = await transaction.ownerExpenseEntry.deleteMany({ where: { id: { in: manifest.ownerExpenseEntryIds } } });
+      expenseEntriesRemoved = deleted.count;
+    }
+
+    await transaction.salesImportBatch.update({ where: { id }, data: { rolledBackAt: new Date(), rolledBackById: req.user.id } });
+    await transaction.auditLog.create({ data: { userId: req.user.id, action: "ROLLBACK_SALES_IMPORT", entityType: "SALE", details: { batchId: id, salesRemoved: presentSaleIds.length, expenseEntriesRemoved } } });
+    return { salesRemoved: presentSaleIds.length, inventoryReplacementsReverted: (manifest.inventoryReplacements || []).length, expenseEntriesRemoved };
+  }, 1, { maxWait: 15_000, timeout: 60_000 });
+
+  return res.json({
+    success: true,
+    message: `Import #${id} rolled back: ${outcome.salesRemoved} sale(s) removed, ${outcome.inventoryReplacementsReverted} inventory balance(s) restored, ${outcome.expenseEntriesRemoved} expense entr${outcome.expenseEntriesRemoved === 1 ? "y" : "ies"} removed.`,
+    data: { outcome },
   });
 }
 
@@ -1459,6 +1582,7 @@ module.exports = {
   previewSalesImport,
   importSales,
   listSalesImportBatches,
+  rollbackSalesImport,
   downloadSalesImportTemplate,
   salesImportPlan,
   validateSaleRequest,
