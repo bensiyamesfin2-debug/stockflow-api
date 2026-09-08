@@ -98,15 +98,32 @@ async function ensureCurrentTenant() {
   });
 }
 
+async function monthlyRevenueSeries(months = 12, now = new Date()) {
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (months - 1), 1));
+  const payments = await prisma.tenantSubscriptionPayment.findMany({ where: { paidAt: { gte: start } }, select: { amountMinor: true, paidAt: true } });
+  const buckets = new Map();
+  for (let index = 0; index < months; index += 1) {
+    const bucket = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (months - 1 - index), 1));
+    buckets.set(`${bucket.getUTCFullYear()}-${String(bucket.getUTCMonth() + 1).padStart(2, "0")}`, 0);
+  }
+  for (const payment of payments) {
+    const paidAt = new Date(payment.paidAt);
+    const key = `${paidAt.getUTCFullYear()}-${String(paidAt.getUTCMonth() + 1).padStart(2, "0")}`;
+    if (buckets.has(key)) buckets.set(key, buckets.get(key) + payment.amountMinor);
+  }
+  return Array.from(buckets, ([month, amountMinor]) => ({ month, amountMinor }));
+}
+
 async function listTenants(req, res) {
   await ensureCurrentTenant();
   const now = new Date();
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const [tenants, currentMonth, lifetime, recentPayments] = await Promise.all([
+  const [tenants, currentMonth, lifetime, recentPayments, monthlyRevenue] = await Promise.all([
     prisma.saasTenant.findMany({ include: { createdBy: { select: { id: true, fullName: true, username: true } } }, orderBy: [{ status: "asc" }, { companyName: "asc" }] }),
     prisma.tenantSubscriptionPayment.aggregate({ where: { paidAt: { gte: monthStart } }, _sum: { amountMinor: true } }),
     prisma.tenantSubscriptionPayment.aggregate({ _sum: { amountMinor: true } }),
     prisma.tenantSubscriptionPayment.findMany({ include: { tenant: { select: { companyName: true, slug: true } } }, orderBy: { paidAt: "desc" }, take: 8 }),
+    monthlyRevenueSeries(12, now),
   ]);
   const billable = tenants.filter((tenant) => !tenant.subscriptionExempt && tenant.provisioningStatus === "COMPLETED");
   const active = billable.filter((tenant) => subscriptionState(tenant, now).allowed);
@@ -119,6 +136,7 @@ async function listTenants(req, res) {
     collectedThisMonthMinor: currentMonth._sum.amountMinor || 0,
     lifetimeRevenueMinor: lifetime._sum.amountMinor || 0,
     recentPayments,
+    monthlyRevenue,
   };
   return res.json({ success: true, data: { tenants: tenants.map(serializeTenant), automation: automationCapability(), subscriptions } });
 }
@@ -372,6 +390,17 @@ async function operationsOverview(req, res) {
   return res.json({ success: true, data: { checkedAt: new Date().toISOString(), summary: { total: tenants.length, healthy, attention, repeatedIncidents: incidents.length }, tenants: healthTenants, incidents } });
 }
 
+async function listTenantActivity(req, res) {
+  const take = Math.min(Number(req.query.limit) || 40, 100);
+  const activity = await prisma.auditLog.findMany({
+    where: { entityType: { in: ["SAAS_TENANT", "TENANT_ERROR"] } },
+    include: { user: { select: { id: true, fullName: true, username: true } } },
+    orderBy: { createdAt: "desc" },
+    take,
+  });
+  return res.json({ success: true, data: { activity } });
+}
+
 async function rotateMonitoringToken(req, res) {
   const id = String(req.params.id || "");
   const tenant = await prisma.saasTenant.findUnique({ where: { id } });
@@ -394,4 +423,4 @@ async function resolveIncident(req, res) {
   return res.json({ success: true, message: "Incident marked resolved" });
 }
 
-module.exports = { listTenants, resolveTenant, createTenant, updateTenant, renewSubscription, updateSubscriptionPrice, provisionTenant, operationsOverview, rotateMonitoringToken, resolveIncident, provisioningConfig, serializeTenant, operationalHealth, automationCapability };
+module.exports = { listTenants, resolveTenant, createTenant, updateTenant, renewSubscription, updateSubscriptionPrice, provisionTenant, operationsOverview, listTenantActivity, rotateMonitoringToken, resolveIncident, provisioningConfig, serializeTenant, operationalHealth, automationCapability };
