@@ -286,36 +286,36 @@ model Inventory {
 }
 
 model Sale {
-  id                 Int                @id @default(autoincrement())
-  saleNumber         String             @unique @map("sale_number") @db.VarChar(50)
-  clientRequestId    String?            @unique @map("client_request_id") @db.Uuid
-  cashierId          Int                @map("cashier_id")
-  customerId         Int?               @map("customer_id")
-  discountId         Int?               @map("discount_id")
-  shiftId            Int?               @map("shift_id")
-  customerName       String?            @map("customer_name") @db.VarChar(150)
-  discountAmount     Decimal            @default(0) @map("discount_amount") @db.Decimal(12, 2)
-  totalAmount        Decimal            @map("total_amount") @db.Decimal(12, 2)
-  creditBalance      Decimal            @default(0) @map("credit_balance") @db.Decimal(12, 2)
-  creditDueAt        DateTime?          @map("credit_due_at") @db.Timestamptz(3)
-  status             SaleStatus         @default(PENDING_RELEASE)
-  createdAt          DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt          DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
-  completedAt        DateTime?          @map("completed_at") @db.Timestamptz(3)
-  cancelledAt        DateTime?          @map("cancelled_at") @db.Timestamptz(3)
-  cancellationReason String?            @map("cancellation_reason")
-  cashier            User               @relation("CashierSales", fields: [cashierId], references: [id], onDelete: Restrict)
-  items              SaleItem[]
-  payments           Payment[]
-  releases           InventoryRelease[]
-  notifications      Notification[]
-  returns            SaleReturn[]
+  id                   Int                        @id @default(autoincrement())
+  saleNumber           String                     @unique @map("sale_number") @db.VarChar(50)
+  clientRequestId      String?                    @unique @map("client_request_id") @db.Uuid
+  cashierId            Int                        @map("cashier_id")
+  customerId           Int?                       @map("customer_id")
+  discountId           Int?                       @map("discount_id")
+  shiftId              Int?                       @map("shift_id")
+  customerName         String?                    @map("customer_name") @db.VarChar(150)
+  discountAmount       Decimal                    @default(0) @map("discount_amount") @db.Decimal(12, 2)
+  totalAmount          Decimal                    @map("total_amount") @db.Decimal(12, 2)
+  creditBalance        Decimal                    @default(0) @map("credit_balance") @db.Decimal(12, 2)
+  creditDueAt          DateTime?                  @map("credit_due_at") @db.Timestamptz(3)
+  status               SaleStatus                 @default(PENDING_RELEASE)
+  createdAt            DateTime                   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime                   @updatedAt @map("updated_at") @db.Timestamptz(3)
+  completedAt          DateTime?                  @map("completed_at") @db.Timestamptz(3)
+  cancelledAt          DateTime?                  @map("cancelled_at") @db.Timestamptz(3)
+  cancellationReason   String?                    @map("cancellation_reason")
+  cashier              User                       @relation("CashierSales", fields: [cashierId], references: [id], onDelete: Restrict)
+  items                SaleItem[]
+  payments             Payment[]
+  releases             InventoryRelease[]
+  notifications        Notification[]
+  returns              SaleReturn[]
   collectionActivities CreditCollectionActivity[]
-  customer           Customer?          @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  discount           Discount?          @relation(fields: [discountId], references: [id], onDelete: SetNull)
-  shift              Shift?             @relation(fields: [shiftId], references: [id], onDelete: SetNull)
-  priceList          PriceList?         @relation(fields: [priceListId], references: [id], onDelete: SetNull)
-  priceListId        Int?               @map("price_list_id")
+  customer             Customer?                  @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  discount             Discount?                  @relation(fields: [discountId], references: [id], onDelete: SetNull)
+  shift                Shift?                     @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  priceList            PriceList?                 @relation(fields: [priceListId], references: [id], onDelete: SetNull)
+  priceListId          Int?                       @map("price_list_id")
 
   @@index([cashierId])
   @@index([customerId])
@@ -326,23 +326,24 @@ model Sale {
 }
 
 model SaleItem {
-  id                 Int                    @id @default(autoincrement())
-  saleId             Int                    @map("sale_id")
-  productId          Int                    @map("product_id")
-  quantity           Int
-  unitPrice          Decimal                @map("unit_price") @db.Decimal(12, 2)
-  costPriceAtSale    Decimal?               @map("cost_price_at_sale") @db.Decimal(12, 2)
-  releasedQuantity   Int                    @default(0) @map("released_quantity")
-  returnedQuantity   Int                    @default(0) @map("returned_quantity")
-  customLength       Int?                   @map("custom_length")
-  customWidth        Int?                   @map("custom_width")
-  customThickness    Int?                   @map("custom_thickness")
-  requestedPieces    Int?                   @map("requested_pieces")
-  piecesPerStockUnit Int?                   @map("pieces_per_stock_unit")
-  sale               Sale                   @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  product            Product                @relation(fields: [productId], references: [id], onDelete: Restrict)
-  releaseItems       InventoryReleaseItem[]
-  returnItems        SaleReturnItem[]
+  id                  Int                    @id @default(autoincrement())
+  saleId              Int                    @map("sale_id")
+  productId           Int                    @map("product_id")
+  quantity            Int
+  unitPrice           Decimal                @map("unit_price") @db.Decimal(12, 2)
+  priceOverrideReason String?                @map("price_override_reason") @db.VarChar(300)
+  costPriceAtSale     Decimal?               @map("cost_price_at_sale") @db.Decimal(12, 2)
+  releasedQuantity    Int                    @default(0) @map("released_quantity")
+  returnedQuantity    Int                    @default(0) @map("returned_quantity")
+  customLength        Int?                   @map("custom_length")
+  customWidth         Int?                   @map("custom_width")
+  customThickness     Int?                   @map("custom_thickness")
+  requestedPieces     Int?                   @map("requested_pieces")
+  piecesPerStockUnit  Int?                   @map("pieces_per_stock_unit")
+  sale                Sale                   @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product             Product                @relation(fields: [productId], references: [id], onDelete: Restrict)
+  releaseItems        InventoryReleaseItem[]
+  returnItems         SaleReturnItem[]
 
   @@index([saleId, productId])
   @@index([productId])

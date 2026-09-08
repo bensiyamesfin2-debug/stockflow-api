@@ -182,7 +182,22 @@ function validateSaleRequest(body) {
         errors.push(`Sale item ${index + 1} quantity must be ${customMeasurement ? "zero or a positive" : "a positive"} whole number`);
       }
 
-      items.push({ productId, quantity, customMeasurement });
+      let overrideUnitPriceCents = null;
+      let priceOverrideReason = null;
+      if (rawItem?.unitPrice !== undefined && rawItem?.unitPrice !== null && rawItem?.unitPrice !== "") {
+        overrideUnitPriceCents = moneyToCents(rawItem.unitPrice);
+        if (overrideUnitPriceCents === null || overrideUnitPriceCents <= 0n) {
+          errors.push(`Sale item ${index + 1} override price is invalid`);
+        }
+        priceOverrideReason = String(rawItem?.priceOverrideReason || "").trim() || null;
+        if (!priceOverrideReason) {
+          errors.push(`Sale item ${index + 1} requires a reason for the price override`);
+        } else if (priceOverrideReason.length > 300) {
+          errors.push(`Sale item ${index + 1} override reason cannot exceed 300 characters`);
+        }
+      }
+
+      items.push({ productId, quantity, customMeasurement, overrideUnitPriceCents, priceOverrideReason });
     });
   }
 
@@ -378,7 +393,7 @@ async function createSale(req, res) {
         product.id,
         (requestedQuantityByProduct.get(product.id) || 0) + item.quantity
       );
-      item.unitPriceCents = saleUnitPriceCents(product, pricesByProduct);
+      item.unitPriceCents = item.overrideUnitPriceCents ?? saleUnitPriceCents(product, pricesByProduct);
       subtotalCents += item.unitPriceCents * BigInt(item.quantity);
     }
 
@@ -460,6 +475,7 @@ async function createSale(req, res) {
           productId: product.id,
           quantity: item.quantity,
           unitPrice: centsToMoney(item.unitPriceCents),
+          priceOverrideReason: item.priceOverrideReason,
           costPriceAtSale: product.costPrice,
           customLength: item.customMeasurement?.length || null,
           customWidth: item.customMeasurement?.width || null,
@@ -509,10 +525,14 @@ async function createSale(req, res) {
       });
     }
 
+    const priceOverrides = data.items
+      .filter((item) => item.priceOverrideReason)
+      .map((item) => ({ productId: item.productId, overridePrice: centsToMoney(item.unitPriceCents), reason: item.priceOverrideReason }));
+
     await transaction.auditLog.create({
       data: {
         userId: req.user.id,
-        action: "CREATE_SALE",
+        action: priceOverrides.length ? "CREATE_SALE_WITH_PRICE_OVERRIDE" : "CREATE_SALE",
         entityType: "SALE",
         entityId: createdSale.id,
         details: {
@@ -527,6 +547,7 @@ async function createSale(req, res) {
           shiftId: activeShift?.id || null,
           creditBalance: centsToMoney(creditBalanceCents),
           creditDueAt: creditBalanceCents > 0n ? data.creditDueAt : null,
+          ...(priceOverrides.length ? { priceOverrides } : {}),
         },
       },
     });
@@ -661,7 +682,7 @@ async function updateSale(req, res) {
         product.id,
         (requestedQuantityByProduct.get(product.id) || 0) + item.quantity
       );
-      item.unitPriceCents = saleUnitPriceCents(product, pricesByProduct);
+      item.unitPriceCents = item.overrideUnitPriceCents ?? saleUnitPriceCents(product, pricesByProduct);
       subtotalCents += item.unitPriceCents * BigInt(item.quantity);
     }
 
@@ -732,6 +753,7 @@ async function updateSale(req, res) {
           productId: product.id,
           quantity: item.quantity,
           unitPrice: centsToMoney(item.unitPriceCents),
+          priceOverrideReason: item.priceOverrideReason,
           costPriceAtSale: product.costPrice,
           customLength: item.customMeasurement?.length || null,
           customWidth: item.customMeasurement?.width || null,
@@ -788,10 +810,14 @@ async function updateSale(req, res) {
       });
     }
 
+    const priceOverrides = data.items
+      .filter((item) => item.priceOverrideReason)
+      .map((item) => ({ productId: item.productId, overridePrice: centsToMoney(item.unitPriceCents), reason: item.priceOverrideReason }));
+
     await transaction.auditLog.create({
       data: {
         userId: req.user.id,
-        action: "UPDATE_SALE",
+        action: priceOverrides.length ? "UPDATE_SALE_WITH_PRICE_OVERRIDE" : "UPDATE_SALE",
         entityType: "SALE",
         entityId: saleId,
         details: {
@@ -806,6 +832,7 @@ async function updateSale(req, res) {
           discountAmount: centsToMoney(discountCents),
           creditBalance: centsToMoney(creditBalanceCents),
           creditDueAt: creditBalanceCents > 0n ? data.creditDueAt : null,
+          ...(priceOverrides.length ? { priceOverrides } : {}),
         },
       },
     });
