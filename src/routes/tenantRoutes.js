@@ -1,5 +1,5 @@
 const express = require("express");
-const { listTenants, resolveTenant, createTenant, updateTenant, renewSubscription, updateSubscriptionPrice, provisionTenant, operationsOverview, rotateMonitoringToken, resolveIncident } = require("../controllers/tenantController");
+const { listTenants, resolveTenant, createTenant, updateTenant, renewSubscription, updateSubscriptionPrice, provisionTenant, operationsOverview, listTenantActivity, rotateMonitoringToken, resolveIncident } = require("../controllers/tenantController");
 const { authenticate, authorizePlatformOwner, authorizeControlPlane } = require("../middleware/auth");
 
 const router = express.Router();
@@ -8,6 +8,7 @@ router.get("/resolve/:slug", resolveTenant);
 router.use(authenticate, authorizePlatformOwner, authorizeControlPlane);
 router.get("/", listTenants);
 router.get("/operations", operationsOverview);
+router.get("/activity", listTenantActivity);
 router.post("/", createTenant);
 router.post("/:id/provision", provisionTenant);
 router.post("/:id/subscription/renew", renewSubscription);
