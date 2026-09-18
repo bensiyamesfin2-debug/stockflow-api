@@ -10,6 +10,9 @@ const dashboardSaleInclude = {
       customLength: true,
       customWidth: true,
       customThickness: true,
+      cutLength: true,
+      cutWidth: true,
+      cutThickness: true,
       requestedPieces: true,
       piecesPerStockUnit: true,
       product: {
