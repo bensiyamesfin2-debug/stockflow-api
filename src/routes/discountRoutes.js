@@ -10,8 +10,8 @@ const { authenticate, authorizeRoles } = require("../middleware/auth");
 const router = express.Router();
 router.use(authenticate, authorizeRoles("ADMIN", "CASHIER"));
 router.get("/", listDiscounts);
-router.post("/", authorizeRoles("ADMIN"), createDiscount);
-router.patch("/:id", authorizeRoles("ADMIN"), updateDiscount);
+router.post("/", authorizeRoles("ADMIN", "CASHIER"), createDiscount);
+router.patch("/:id", authorizeRoles("ADMIN", "CASHIER"), updateDiscount);
 router.post("/:id/apply", applyDiscount);
 
 module.exports = router;
