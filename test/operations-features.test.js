@@ -367,21 +367,42 @@ test("Excel catalogue import reads product dimensions and optional opening quant
 test("StockFlow sales workbook finds row 8 headers and validates bank or credit details", async () => {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("Sales Entry");
-  sheet.getRow(8).values = ["Date of Sale", "Product Type", "Material / Product", "Quantity Sold", "Amount (ETB)", "Payment Type", "Bank Name", "Recipient Account No.", "Payment Details", "Notes"];
-  sheet.getRow(9).values = [new Date("2026-08-19T12:00:00Z"), "Granite", "BG-220-34-3", 2, 5000, "Bank Transfer", "Commercial Bank of Ethiopia", "10001-2345", "", "Counter sale"];
-  sheet.getRow(10).values = [new Date("2026-08-19T12:00:00Z"), "Granite", "BG-220-34-3", 1, 2500, "Credit", "", "", "Credit", ""];
-  sheet.getRow(11).values = [new Date("2018-11-04T12:00:00Z"), "Granite", "BG-220-34-3", 1, 2500, "Legacy / Unknown", "", "", "Legacy / Unknown", "Imported history"];
+  sheet.getRow(8).values = ["Date of Sale", "Product Type", "Material / Product", "Quantity Sold", "Amount (ETB)", "Payment Type", "Bank Name", "Recipient Account No.", "Notes"];
+  sheet.getRow(9).values = [new Date("2026-08-19T12:00:00Z"), "Granite", "BG-220-34-3", 2, 5000, "Bank Transfer", "Commercial Bank of Ethiopia", "10001-2345", "Counter sale"];
+  sheet.getRow(10).values = [new Date("2026-08-19T12:00:00Z"), "Granite", "BG-220-34-3", 1, 2500, "Credit", "", "", ""];
   const products = [{ id: 7, sku: "BG-220-34-3", name: "Black Galaxy", length: 220, width: 34, thickness: 3, isActive: true }];
   const result = await parseSalesWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()), products);
   assert.deepEqual(result.errors, []);
   assert.equal(result.headerRow, 8);
-  assert.equal(result.rows.length, 3);
+  assert.equal(result.rows.length, 2);
   assert.equal(result.rows[0].paymentMethod, "BANK_TRANSFER");
   assert.equal(result.rows[0].recipientAccount, "10001-2345");
   assert.equal(result.rows[1].paymentMethod, "CREDIT");
   assert.equal(result.rows[1].bankName, null);
   assert.equal(result.rows[1].amountCents, 250000n);
-  assert.equal(result.rows[2].paymentMethod, "LEGACY_UNKNOWN");
+});
+
+test("StockFlow sales workbook accepts an optional customer size and stock cut size", async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("Sales Entry");
+  sheet.getRow(8).values = ["Date of Sale", "Material / Product", "Customer Length (cm)", "Customer Width (cm)", "Customer Thickness (cm)", "Stock Cut Length (cm)", "Stock Cut Width (cm)", "Stock Cut Thickness (cm)", "Quantity", "Amount (ETB)", "Payment Type"];
+  sheet.getRow(9).values = [new Date("2026-09-01T12:00:00Z"), "BG-220-34-3", 30, 15, 3, 32, 16, 3, 5, 750, "Cash"];
+  sheet.getRow(10).values = [new Date("2026-09-02T12:00:00Z"), "BG-220-34-3", "", "", "", "", "", "", 3, 7500, "Cash"];
+  const products = [{ id: 7, sku: "BG-220-34-3", name: "Black Galaxy", length: 220, width: 34, thickness: 3, isActive: true }];
+  const result = await parseSalesWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()), products);
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.rows[0].customMeasurement, { length: 30, width: 15, thickness: 3, pieces: 5, cutLength: 32, cutWidth: 16, cutThickness: 3 });
+  assert.equal(result.rows[1].customMeasurement, null);
+});
+
+test("StockFlow sales workbook rejects a partial customer size", async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("Sales Entry");
+  sheet.getRow(8).values = ["Date of Sale", "Material / Product", "Customer Length (cm)", "Customer Width (cm)", "Customer Thickness (cm)", "Quantity", "Amount (ETB)", "Payment Type"];
+  sheet.getRow(9).values = [new Date("2026-09-01T12:00:00Z"), "BG-220-34-3", 30, "", 3, 5, 750, "Cash"];
+  const products = [{ id: 7, sku: "BG-220-34-3", name: "Black Galaxy", length: 220, width: 34, thickness: 3, isActive: true }];
+  const result = await parseSalesWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()), products);
+  assert.match(result.errors.join(" "), /Customer size length, width, and thickness must be filled in together/);
 });
 
 test("StockFlow sales workbook rejects bank transfers without their destination", async () => {

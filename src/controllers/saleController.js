@@ -15,10 +15,9 @@ const { deliverWhatsAppText, saleWhatsAppMessage } = require("../utils/whatsapp"
 const {
   planCustomCuts,
   normalizeCustomMeasurement,
+  calculateCustomOrder,
 } = require("../utils/customOrder");
 const { parseSalesWorkbook, productLabel } = require("../utils/salesWorkbook");
-const { currentBalanceCents } = require("./ownerExpenseController");
-const { makeInternalSku, normalizeProductName } = require("../utils/productCatalog");
 
 const PAYMENT_METHODS = new Set([
   "CASH",
@@ -1143,15 +1142,26 @@ async function salesImportPlan(buffer) {
   const requestedByProduct = new Map();
   for (const row of parsed.rows) {
     if (!row.product) {
-      if (!row.historical) parsed.errors.push(`Row ${row.rowNumber}: create this product in the catalogue first or provide Beginning/Remaining Inventory for a historical setup`);
+      parsed.errors.push(`Row ${row.rowNumber}: create this product in the catalogue first, exactly as a live sale would require`);
       continue;
     }
-    if (row.historical || row.paymentMethod === "LEGACY_UNKNOWN") continue;
-    const requested = (requestedByProduct.get(row.product.id) || 0) + row.quantity;
+    if (row.customMeasurement) {
+      try {
+        const plan = calculateCustomOrder(row.product, row.customMeasurement);
+        row.stockQuantity = plan.quantity;
+        row.piecesPerStockUnit = plan.piecesPerStockUnit;
+      } catch (error) {
+        parsed.errors.push(`Row ${row.rowNumber}: ${error.message}`);
+        continue;
+      }
+    } else {
+      row.stockQuantity = row.quantity;
+    }
+    const requested = (requestedByProduct.get(row.product.id) || 0) + row.stockQuantity;
     requestedByProduct.set(row.product.id, requested);
     const available = (row.product.inventory?.quantity || 0) - (row.product.inventory?.reservedQuantity || 0);
     if (requested > available) {
-      parsed.errors.push(`Row ${row.rowNumber}: only ${Math.max(0, available - requested + row.quantity)} more unit(s) of ${productLabel(row.product)} are available for this workbook`);
+      parsed.errors.push(`Row ${row.rowNumber}: only ${Math.max(0, available - requested + row.stockQuantity)} more stock unit(s) of ${productLabel(row.product)} are available for this workbook`);
     }
   }
   return parsed;
@@ -1167,6 +1177,8 @@ function publicSalesImportPreview(plan) {
       productAction: row.product ? "UPDATE" : "CREATE",
       productType: row.productType,
       quantity: row.quantity,
+      customerSize: row.customMeasurement ? { length: row.customMeasurement.length, width: row.customMeasurement.width, thickness: row.customMeasurement.thickness } : null,
+      stockCutSize: row.customMeasurement?.cutLength ? { length: row.customMeasurement.cutLength, width: row.customMeasurement.cutWidth, thickness: row.customMeasurement.cutThickness } : null,
       amount: centsToMoney(row.amountCents),
       paymentMethod: row.paymentMethod,
       bankName: row.bankName,
@@ -1174,24 +1186,11 @@ function publicSalesImportPreview(plan) {
       customerName: row.customerName,
       amountReceived: centsToMoney(row.collectedCents),
       outstandingCredit: centsToMoney(row.creditBalanceCents),
-      openingBalance: row.openingBalance,
-      remainingInventory: row.remainingInventory,
-      currentSellingPrice: row.currentSellingPriceCents === null ? null : centsToMoney(row.currentSellingPriceCents),
-      historical: row.historical,
     })),
     sales: plan.rows.length,
     units: plan.rows.reduce((total, row) => total + row.quantity, 0),
     amount: centsToMoney(plan.rows.reduce((total, row) => total + row.amountCents, 0n)),
     creditAmount: centsToMoney(plan.rows.reduce((total, row) => total + row.creditBalanceCents, 0n)),
-    legacySales: plan.rows.filter((row) => row.historical || row.paymentMethod === "LEGACY_UNKNOWN").length,
-    inventoryReplacements: new Set(plan.rows
-      .filter((row) => row.remainingInventory !== null)
-      .map((row) => row.product
-        ? `product:${row.product.id}`
-        : `new:${String(row.productSpec?.name || "").toLowerCase()}:${row.productSpec?.length || ""}:${row.productSpec?.width || ""}:${row.productSpec?.thickness || ""}`))
-      .size,
-    inventoryMovements: plan.movements.length,
-    expenseEntries: plan.expenses.length,
   };
 }
 
@@ -1225,34 +1224,16 @@ async function importSales(req, res) {
   const fileName = fileNameHeader ? decodeURIComponent(fileNameHeader).slice(0, 255) : null;
 
   const counts = await runSerializableTransaction(async (transaction) => {
-    const createdProducts = new Map();
-    for (const sourceRow of [...plan.rows, ...plan.movements]) {
-      if (sourceRow.product) continue;
-      const spec = sourceRow.productSpec;
-      const normalizedName = normalizeProductName(spec.name);
-      if (normalizedName.error) throw new HttpError(400, `Row ${sourceRow.rowNumber}: ${normalizedName.error}`);
-      const sku = makeInternalSku(normalizedName.name, spec.length, spec.width, spec.thickness);
-      let product = createdProducts.get(sku) || await transaction.product.findUnique({ where: { sku }, include: { inventory: true } });
-      const sellingPriceCents = sourceRow.unitPriceCents || (sourceRow.amountCents && sourceRow.quantity ? sourceRow.amountCents / BigInt(sourceRow.quantity) : 0n);
-      if (!product) product = await transaction.product.create({ data: { sku, name: normalizedName.name, length: spec.length, width: spec.width, thickness: spec.thickness, sellingPrice: centsToMoney(sellingPriceCents), description: `Created from historical workbook row ${sourceRow.rowNumber}`, inventory: { create: { quantity: 0, reservedQuantity: 0 } } }, include: { inventory: true } });
-      createdProducts.set(sku, product);
-      sourceRow.product = product;
-    }
-    const currentPrices = new Map();
-    for (const row of plan.rows) if (row.currentSellingPriceCents !== null) currentPrices.set(row.product.id, row.currentSellingPriceCents);
-    for (const [productId, priceCents] of currentPrices) await transaction.product.update({ where: { id: productId }, data: { sellingPrice: centsToMoney(priceCents) } });
     const productIds = [...new Set(plan.rows.map((row) => row.product.id))];
     const products = await transaction.product.findMany({ where: { id: { in: productIds }, isActive: true }, include: { inventory: true } });
     const productById = new Map(products.map((product) => [product.id, product]));
     const requestedByProduct = new Map();
-    for (const row of plan.rows) {
-      if (!row.historical && row.paymentMethod !== "LEGACY_UNKNOWN") requestedByProduct.set(row.product.id, (requestedByProduct.get(row.product.id) || 0) + row.quantity);
-    }
+    for (const row of plan.rows) requestedByProduct.set(row.product.id, (requestedByProduct.get(row.product.id) || 0) + row.stockQuantity);
     for (const [productId, quantity] of requestedByProduct) {
       const product = productById.get(productId);
       if (!product) throw new HttpError(409, "A product in this workbook is no longer active");
       const available = (product.inventory?.quantity || 0) - (product.inventory?.reservedQuantity || 0);
-      if (available < quantity) throw new HttpError(409, `Only ${available} unit(s) of ${product.name} are now available`);
+      if (available < quantity) throw new HttpError(409, `Only ${available} stock unit(s) of ${product.name} are now available`);
     }
 
     const [activeShift, inventoryStaff] = await Promise.all([
@@ -1262,11 +1243,6 @@ async function importSales(req, res) {
     const createdIds = [];
     for (const row of plan.rows) {
       const product = productById.get(row.product.id);
-      const credit = row.creditBalanceCents > 0n;
-      const legacy = row.historical || row.paymentMethod === "LEGACY_UNKNOWN";
-      const quantity = BigInt(row.quantity);
-      const baseUnitPriceCents = row.amountCents / quantity;
-      const higherPriceQuantity = Number(row.amountCents % quantity);
       const saleNumber = makeSaleNumber(row.saleDate);
       const sale = await transaction.sale.create({ data: {
         saleNumber,
@@ -1275,26 +1251,30 @@ async function importSales(req, res) {
         shiftId: activeShift?.id || null,
         totalAmount: centsToMoney(row.amountCents),
         creditBalance: centsToMoney(row.creditBalanceCents),
-        status: legacy ? "COMPLETED" : "PENDING_RELEASE",
-        completedAt: legacy ? row.saleDate : null,
+        status: "PENDING_RELEASE",
         createdAt: row.saleDate,
       } });
-      const priceGroups = [
-        { quantity: higherPriceQuantity, unitPriceCents: baseUnitPriceCents + 1n },
-        { quantity: row.quantity - higherPriceQuantity, unitPriceCents: baseUnitPriceCents },
-      ].filter((group) => group.quantity > 0);
-      for (const group of priceGroups) {
-        await transaction.saleItem.create({ data: {
-          saleId: sale.id,
-          productId: product.id,
-          quantity: group.quantity,
-          unitPrice: centsToMoney(group.unitPriceCents),
-          costPriceAtSale: product.costPrice,
-          releasedQuantity: legacy ? group.quantity : 0,
-        } });
-      }
-      if (!legacy) await transaction.inventory.update({ where: { productId: product.id }, data: { reservedQuantity: { increment: row.quantity } } });
-      if (row.collectedCents > 0n && row.paymentMethod !== "LEGACY_UNKNOWN" && row.paymentMethod !== "CREDIT") {
+      const measurement = row.customMeasurement;
+      // Priced per stock unit consumed, exactly like a live custom sale item
+      // (see effectivePrice() * quantity in the cashier cart), not per piece.
+      const unitPriceCents = row.amountCents / BigInt(row.stockQuantity);
+      await transaction.saleItem.create({ data: {
+        saleId: sale.id,
+        productId: product.id,
+        quantity: row.stockQuantity,
+        unitPrice: centsToMoney(unitPriceCents),
+        costPriceAtSale: product.costPrice,
+        customLength: measurement?.length || null,
+        customWidth: measurement?.width || null,
+        customThickness: measurement?.thickness || null,
+        cutLength: measurement?.cutLength || null,
+        cutWidth: measurement?.cutWidth || null,
+        cutThickness: measurement?.cutThickness || null,
+        requestedPieces: measurement?.pieces || null,
+        piecesPerStockUnit: row.piecesPerStockUnit || null,
+      } });
+      await transaction.inventory.update({ where: { productId: product.id }, data: { reservedQuantity: { increment: row.stockQuantity } } });
+      if (row.collectedCents > 0n && row.paymentMethod !== "CREDIT") {
         await transaction.payment.create({ data: {
           saleId: sale.id,
           paymentMethod: row.paymentMethod,
@@ -1306,51 +1286,19 @@ async function importSales(req, res) {
           createdAt: row.saleDate,
         } });
       }
-      if (!legacy && inventoryStaff.length) {
-        const notification = buildSaleNotification({ saleNumber, customerName: null, items: [{ quantity: row.quantity }] });
+      if (inventoryStaff.length) {
+        const notification = buildSaleNotification({ saleNumber, customerName: null, items: [{ quantity: row.stockQuantity }] });
         await transaction.notification.createMany({ data: inventoryStaff.map((staff) => ({ userId: staff.id, saleId: sale.id, ...notification })) });
       }
       createdIds.push(sale.id);
     }
 
-    const replacementByProduct = new Map();
-    for (const row of plan.rows) {
-      if (row.remainingInventory === null) continue;
-      const current = replacementByProduct.get(row.product.id);
-      if (!current || row.saleDate >= current.saleDate) replacementByProduct.set(row.product.id, row);
-    }
-    for (const [productId, row] of replacementByProduct) {
-      const before = await transaction.inventory.findUnique({ where: { productId } });
-      const updated = await transaction.inventory.upsert({ where: { productId }, create: { productId, quantity: row.remainingInventory, reservedQuantity: 0 }, update: { quantity: row.remainingInventory, reservedQuantity: 0 } });
-      const delta = row.remainingInventory - (before?.quantity || 0);
-      if (delta !== 0) {
-        await transaction.inventoryMovement.create({ data: { productId, movementType: delta > 0 ? "ADJUSTMENT_IN" : "ADJUSTMENT_OUT", quantityChange: delta, balanceAfter: updated.quantity, referenceType: "HISTORICAL_BALANCE_IMPORT", createdById: req.user.id, createdAt: row.saleDate, notes: `Opening balance ${row.openingBalance ?? "not recorded"}; current balance replaced from ${row.sourceSheet || "Excel"}` } });
-      }
-    }
-
-    for (const movement of plan.movements) {
-      const inventory = await transaction.inventory.findUnique({ where: { productId: movement.product.id } });
-      await transaction.inventoryMovement.create({ data: { productId: movement.product.id, movementType: movement.movementType, quantityChange: movement.movementType === "STOCK_IN" ? movement.quantity : -movement.quantity, balanceAfter: movement.balanceAfter ?? inventory?.quantity ?? 0, referenceType: "LEGACY_INVENTORY_HISTORY", createdById: req.user.id, createdAt: movement.transactionDate, notes: movement.notes } });
-    }
-
-    let expenseBalance = await currentBalanceCents(transaction);
-    for (const expense of [...plan.expenses].sort((left, right) => left.transactionDate - right.transactionDate || left.rowNumber - right.rowNumber)) {
-      if (expense.entryType === "OUT" && expense.amountCents > expenseBalance) throw new HttpError(409, `Owner Expense Account row ${expense.rowNumber} spends more than the available balance`);
-      expenseBalance = expense.entryType === "IN" ? expenseBalance + expense.amountCents : expenseBalance - expense.amountCents;
-      await transaction.ownerExpenseEntry.create({ data: { entryType: expense.entryType, amount: centsToMoney(expense.amountCents), balanceAfter: centsToMoney(expenseBalance), note: expense.note, transactionDate: expense.transactionDate, createdById: req.user.id } });
-    }
     const result = {
       sales: plan.rows.length,
-      units: plan.rows.reduce((total, row) => total + row.quantity, 0),
+      units: plan.rows.reduce((total, row) => total + row.stockQuantity, 0),
       amount: centsToMoney(plan.rows.reduce((total, row) => total + row.amountCents, 0n)),
       creditSales: plan.rows.filter((row) => row.creditBalanceCents > 0n).length,
-      legacySales: plan.rows.filter((row) => row.historical || row.paymentMethod === "LEGACY_UNKNOWN").length,
-      inventoryReplacements: replacementByProduct.size,
-      inventoryMovements: plan.movements.length,
-      expenseEntries: plan.expenses.length,
-      source: "StockFlow Historical Operations Excel",
-      productsCreated: createdProducts.size,
-      pricesUpdated: currentPrices.size,
+      source: "StockFlow Sale Entry Excel",
       saleIds: createdIds,
     };
     await transaction.auditLog.create({ data: { userId: req.user.id, action: "IMPORT_SALES_WORKBOOK", entityType: "SALE", details: result } });
@@ -1363,8 +1311,7 @@ async function importSales(req, res) {
     return result;
   }, 1, { maxWait: 15_000, timeout: 120_000 });
 
-  const releaseCount = counts.sales - counts.legacySales;
-  return res.status(201).json({ success: true, message: `${counts.sales} sales imported; ${counts.inventoryReplacements} inventory balances replaced; ${counts.expenseEntries} expense-account entries added${releaseCount ? `; ${releaseCount} current sales sent to warehouse release` : ""}`, data: { counts } });
+  return res.status(201).json({ success: true, message: `${counts.sales} sales imported and sent to warehouse release`, data: { counts } });
 }
 
 async function listSalesImportBatches(req, res) {
@@ -1376,68 +1323,44 @@ async function listSalesImportBatches(req, res) {
 }
 
 async function downloadSalesImportTemplate(req, res) {
-  const templateVersion = "2";
+  const templateVersion = "4";
   const products = await prisma.product.findMany({ where: { isActive: true }, include: { category: { select: { name: true } } }, orderBy: [{ name: "asc" }, { length: "desc" }] });
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "StockFlow";
-  workbook.title = `StockFlow Complete Operations Import Template v${templateVersion}`;
-  workbook.subject = "Sales, inventory balances, inventory history, payment destinations, and owner expense account import";
+  workbook.title = `StockFlow Sale Entry Import Template v${templateVersion}`;
+  workbook.subject = "Bulk sale entry with customer size vs. stock cut size, and payment destinations";
   workbook.company = "StockFlow";
   workbook.created = new Date();
   const sheet = workbook.addWorksheet("Sales Entry", { views: [{ state: "frozen", xSplit: 4, ySplit: 8, showGridLines: false }] });
-  sheet.mergeCells("A1:T1"); sheet.getCell("A1").value = `STOCKFLOW COMPLETE OPERATIONS IMPORT TEMPLATE · v${templateVersion}`;
-  sheet.mergeCells("A2:T2"); sheet.getCell("A2").value = "One workbook for historical sales, credit, opening and remaining inventory, bank destinations, prices, stock movements, and owner expenses.";
-  sheet.mergeCells("A4:C4"); sheet.getCell("A4").value = "FULL SALE VALUE"; sheet.getCell("A5").value = { formula: "SUM(L9:L2008)", result: 0 };
-  sheet.mergeCells("D4:F4"); sheet.getCell("D4").value = "AMOUNT RECEIVED"; sheet.getCell("D5").value = { formula: "SUM(M9:M2008)", result: 0 };
-  sheet.mergeCells("G4:I4"); sheet.getCell("G4").value = "OUTSTANDING CREDIT"; sheet.getCell("G5").value = { formula: "SUM(N9:N2008)", result: 0 };
-  sheet.mergeCells("J4:L4"); sheet.getCell("J4").value = "QUANTITY SOLD"; sheet.getCell("J5").value = { formula: "SUM(I9:I2008)", result: 0 };
-  sheet.mergeCells("A7:T7"); sheet.getCell("A7").value = "ONE PRODUCT + MEASUREMENT PER ROW — historical balances replace current inventory after confirmation";
-  const headers = ["Date of Sale", "Customer Name", "Product Type", "Material / Product", "Length", "Width", "Thickness", "Beginning Balance", "Quantity Sold", "Remaining Inventory", "Selling Price", "Full Sale Value", "Amount Received", "Outstanding Credit", "Payment Type", "Payment Destination", "Recipient Account No.", "Notes", "Source Sheet", "Current Selling Price"];
+  sheet.mergeCells("A1:S1"); sheet.getCell("A1").value = `STOCKFLOW SALE ENTRY IMPORT TEMPLATE · v${templateVersion}`;
+  sheet.mergeCells("A2:S2"); sheet.getCell("A2").value = "One row per sale. Customer size is what the customer ordered; Stock cut size is optional and only needed when the actual cut differs from the order.";
+  sheet.mergeCells("A4:C4"); sheet.getCell("A4").value = "CUSTOMER LINE TOTAL"; sheet.getCell("A5").value = { formula: "SUM(M9:M2008)", result: 0 };
+  sheet.mergeCells("D4:F4"); sheet.getCell("D4").value = "AMOUNT RECEIVED"; sheet.getCell("D5").value = { formula: "SUM(N9:N2008)", result: 0 };
+  sheet.mergeCells("G4:I4"); sheet.getCell("G4").value = "OUTSTANDING CREDIT"; sheet.getCell("G5").value = { formula: "SUM(O9:O2008)", result: 0 };
+  sheet.mergeCells("J4:L4"); sheet.getCell("J4").value = "QUANTITY"; sheet.getCell("J5").value = { formula: "SUM(K9:K2008)", result: 0 };
+  sheet.mergeCells("A7:S7"); sheet.getCell("A7").value = "ONE PRODUCT PER ROW — every row creates a real sale and reserves stock, exactly like the cashier sales screen";
+  const headers = ["Date of Sale", "Customer Name", "Product Type", "Material / Product", "Customer Length (cm)", "Customer Width (cm)", "Customer Thickness (cm)", "Stock Cut Length (cm)", "Stock Cut Width (cm)", "Stock Cut Thickness (cm)", "Quantity", "Customer Price", "Customer Line Total", "Amount Received", "Outstanding Credit", "Payment Type", "Payment Destination", "Recipient Account No.", "Notes"];
   sheet.getRow(8).values = headers;
-  sheet.columns = [{ width: 15 }, { width: 22 }, { width: 18 }, { width: 38 }, { width: 10 }, { width: 10 }, { width: 11 }, { width: 17 }, { width: 14 }, { width: 19 }, { width: 15 }, { width: 18 }, { width: 18 }, { width: 19 }, { width: 18 }, { width: 24 }, { width: 24 }, { width: 34 }, { width: 18 }, { width: 19 }];
+  sheet.columns = [{ width: 15 }, { width: 22 }, { width: 18 }, { width: 38 }, { width: 13 }, { width: 12 }, { width: 14 }, { width: 13 }, { width: 12 }, { width: 14 }, { width: 11 }, { width: 15 }, { width: 17 }, { width: 16 }, { width: 17 }, { width: 15 }, { width: 24 }, { width: 24 }, { width: 34 }];
   for (let row = 9; row <= 208; row += 1) {
-    sheet.getCell(`O${row}`).dataValidation = { type: "list", allowBlank: false, formulae: ['"Bank Transfer,Credit,Cash,Mobile Money,Card,Payment details unknown"'] };
-    sheet.getCell(`L${row}`).value = { formula: `IF(OR(I${row}="",K${row}=""),"",I${row}*K${row})`, result: "" };
-    sheet.getCell(`N${row}`).value = { formula: `IF(L${row}="","",MAX(L${row}-IF(M${row}="",0,M${row}),0))`, result: "" };
+    sheet.getCell(`P${row}`).dataValidation = { type: "list", allowBlank: false, formulae: ['"Bank Transfer,Credit,Cash,Mobile Money,Card"'] };
+    sheet.getCell(`M${row}`).value = { formula: `IF(OR(K${row}="",L${row}=""),"",K${row}*L${row})`, result: "" };
+    sheet.getCell(`O${row}`).value = { formula: `IF(M${row}="","",MAX(M${row}-IF(N${row}="",0,N${row}),0))`, result: "" };
     sheet.getCell(`A${row}`).numFmt = "yyyy-mm-dd";
-    ["E", "F", "G", "H", "I", "J"].forEach((column) => { sheet.getCell(`${column}${row}`).numFmt = "0"; });
-    ["K", "L", "M", "N", "T"].forEach((column) => { sheet.getCell(`${column}${row}`).numFmt = '#,##0.00 "ETB"'; });
-    sheet.getCell(`Q${row}`).numFmt = "@";
+    ["E", "F", "G", "H", "I", "J", "K"].forEach((column) => { sheet.getCell(`${column}${row}`).numFmt = "0"; });
+    ["L", "M", "N", "O"].forEach((column) => { sheet.getCell(`${column}${row}`).numFmt = '#,##0.00 "ETB"'; });
   }
-  sheet.getCell("C8").note = "Choose a product type from the Catalogue Guide dropdown, or type a new product type when importing a historical item that is not yet in StockFlow.";
-  sheet.getCell("D8").note = "Choose the exact product label from Catalogue Guide. StockFlow also accepts a new Product Type plus Length, Width, and Thickness for historical items.";
-  sheet.getCell("J8").note = "This becomes the current inventory quantity after the import is confirmed.";
-  sheet.getCell("P8").note = "For bank transfers, enter the bank or payment destination. If unknown, use Account not recorded.";
+  sheet.getCell("C8").note = "Choose a product type from the Catalogue Guide dropdown.";
+  sheet.getCell("D8").note = "Choose the exact product label from Catalogue Guide — this must be an existing, active catalogue item.";
+  sheet.getCell("E8").note = "Leave Customer/Stock Cut size blank for a plain catalogue item sold at its own measurement. Fill in Customer Length, Width, and Thickness together for a custom-cut piece.";
+  sheet.getCell("H8").note = "Optional. Only fill in Stock Cut Length/Width/Thickness when the piece actually cut differs from what the customer ordered (e.g. rounded up to the nearest size the slab supports). Leave blank to mean the cut matched the order exactly.";
+  sheet.getCell("K8").note = "For a custom-cut item, this is the number of pieces wanted, not the number of stock slabs — StockFlow works out how many slabs that needs.";
+  sheet.getCell("Q8").note = "For bank transfers, enter the bank or payment destination.";
   sheet.getRow(1).height = 34;
   sheet.getRow(1).eachCell((cell) => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF111111" } }; cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 18 }; });
   sheet.getRow(8).eachCell((cell) => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF176B5B" } }; cell.font = { bold: true, color: { argb: "FFFFFFFF" } }; cell.alignment = { wrapText: true, vertical: "middle" }; });
   sheet.getRow(8).height = 30;
-  sheet.autoFilter = { from: "A8", to: "T208" };
-
-  const history = workbook.addWorksheet("Inventory History", { views: [{ state: "frozen", ySplit: 5, showGridLines: false }] });
-  history.mergeCells("A1:H1"); history.getCell("A1").value = "HISTORICAL INVENTORY MOVEMENTS";
-  history.mergeCells("A2:H2"); history.getCell("A2").value = "Use In for stock received and Out for stock sold or removed. These rows preserve history; the Sales Entry Remaining Inventory value controls current stock.";
-  history.getRow(5).values = ["Date", "Product Type", "Material / Product", "Movement Type", "Quantity", "Balance After", "Note", "Source Sheet"];
-  history.columns = [{ width: 15 }, { width: 20 }, { width: 44 }, { width: 17 }, { width: 12 }, { width: 16 }, { width: 35 }, { width: 18 }];
-  for (let row = 6; row <= 505; row += 1) {
-    history.getCell(`D${row}`).dataValidation = { type: "list", allowBlank: false, formulae: ['"In,Out"'] };
-    history.getCell(`A${row}`).numFmt = "yyyy-mm-dd";
-    history.getCell(`E${row}`).numFmt = "0";
-    history.getCell(`F${row}`).numFmt = "0";
-  }
-  history.autoFilter = { from: "A5", to: "H505" };
-
-  const expense = workbook.addWorksheet("Owner Expense Account", { views: [{ state: "frozen", ySplit: 5, showGridLines: false }] });
-  expense.mergeCells("A1:E1"); expense.getCell("A1").value = "OWNER EXPENSE ACCOUNT";
-  expense.mergeCells("A2:E2"); expense.getCell("A2").value = "In adds funds. Out records spending. StockFlow blocks Out when it exceeds the available balance. This account stays separate from profit.";
-  expense.getRow(5).values = ["Date", "Entry Type", "Amount", "Note", "Source Sheet"];
-  expense.columns = [{ width: 15 }, { width: 18 }, { width: 20 }, { width: 55 }, { width: 18 }];
-  for (let row = 6; row <= 505; row += 1) {
-    expense.getCell(`B${row}`).dataValidation = { type: "list", allowBlank: false, formulae: ['"In,Out"'] };
-    expense.getCell(`A${row}`).numFmt = "yyyy-mm-dd";
-    expense.getCell(`C${row}`).numFmt = '#,##0.00 "ETB"';
-  }
-  expense.autoFilter = { from: "A5", to: "E505" };
+  sheet.autoFilter = { from: "A8", to: "S208" };
 
   const recipients = workbook.addWorksheet("Recipient Destinations", { views: [{ state: "frozen", ySplit: 5, showGridLines: false }] });
   recipients.mergeCells("A1:D1"); recipients.getCell("A1").value = "PAYMENT RECIPIENT DESTINATIONS";
@@ -1462,18 +1385,17 @@ async function downloadSalesImportTemplate(req, res) {
   }
   const instructions = workbook.addWorksheet("Instructions", { views: [{ showGridLines: false }] });
   instructions.getColumn(1).width = 110;
-  [`STOCKFLOW COMPLETE OPERATIONS IMPORT · TEMPLATE v${templateVersion}`, "Keep every header and sheet name unchanged.", "Sales Entry accepts the dropdown product label or a Product Type plus Length, Width, and Thickness for new historical items.", "Beginning Balance stores opening stock. Remaining Inventory replaces the product’s current quantity.", "Full Sale Value is Quantity Sold × Selling Price. Amount Received is what was paid. The difference becomes Outstanding Credit.", "Use Bank Transfer for paid historical rows. If the destination or account is missing, use Bank transfer and Account not recorded.", "Withold is received value and reduces outstanding credit.", "Inventory History preserves In and Out movements without changing the final current quantity set on Sales Entry.", "Owner Expense Account is separate from revenue and profit. In adds funds; Out spends funds and cannot exceed the available balance.", "Preview before importing. Importing the same workbook twice creates duplicate historical records."].forEach((text) => instructions.addRow([text]));
+  [`STOCKFLOW SALE ENTRY IMPORT · TEMPLATE v${templateVersion}`, "Keep every header and sheet name unchanged.", "Material / Product must be an existing, active catalogue item chosen from the Catalogue Guide dropdown — this workbook does not create new products.", "Leave Customer Length/Width/Thickness blank to sell a plain catalogue item at its own measurement. Fill in all three together for a custom-cut piece, exactly like the cashier sales screen.", "Stock Cut Length/Width/Thickness is optional and only needed when the piece actually cut is a different size than what the customer ordered; leave it blank to mean the cut matched the order.", "Customer Line Total is Quantity × Customer Price. Amount Received is what was paid. The difference becomes Outstanding Credit.", "Use Bank Transfer or Mobile Money with a destination and account number, or Credit with no immediate payment.", "Every row creates a real sale, reserves stock, and is sent to warehouse release — just like ringing up a sale at the counter.", "Preview before importing. Importing the same workbook twice is blocked."].forEach((text) => instructions.addRow([text]));
   instructions.getCell("A1").font = { bold: true, size: 16 };
 
-  for (const worksheet of [history, expense, recipients]) {
-    worksheet.getRow(1).height = 32;
-    worksheet.getRow(1).eachCell((cell) => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF111111" } }; cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 16 }; });
-    worksheet.getRow(5).eachCell((cell) => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF176B5B" } }; cell.font = { bold: true, color: { argb: "FFFFFFFF" } }; cell.alignment = { wrapText: true, vertical: "middle" }; });
-    worksheet.getRow(5).height = 28;
-  }
+  recipients.getRow(1).height = 32;
+  recipients.getRow(1).eachCell((cell) => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF111111" } }; cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 16 }; });
+  recipients.getRow(5).eachCell((cell) => { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF176B5B" } }; cell.font = { bold: true, color: { argb: "FFFFFFFF" } }; cell.alignment = { wrapText: true, vertical: "middle" }; });
+  recipients.getRow(5).height = 28;
+
   const buffer = await workbook.xlsx.writeBuffer();
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  res.setHeader("Content-Disposition", `attachment; filename="stockflow-complete-operations-template-v${templateVersion}.xlsx"`);
+  res.setHeader("Content-Disposition", `attachment; filename="stockflow-sale-entry-template-v${templateVersion}.xlsx"`);
   res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, private");
   res.setHeader("Pragma", "no-cache");
   res.setHeader("Expires", "0");

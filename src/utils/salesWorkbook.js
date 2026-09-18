@@ -1,5 +1,6 @@
 const ExcelJS = require("exceljs");
 const JSZip = require("jszip");
+const { positiveWholeNumber } = require("./customOrder");
 
 const HEADER_ALIASES = {
   date: ["date of sale", "sale date", "date"],
@@ -9,19 +10,21 @@ const HEADER_ALIASES = {
   length: ["length", "length cm", "l"],
   width: ["width", "width cm", "w"],
   thickness: ["thickness", "thickness cm", "t"],
-  openingBalance: ["beginning balance", "opening balance", "opening inventory", "starting inventory"],
-  quantity: ["quantity sold", "quantity of material sold", "quantity", "qty sold", "qty"],
-  remainingInventory: ["remaining inventory", "remaining", "current inventory", "current balance"],
-  unitPrice: ["selling price", "unit price", "price"],
-  currentSellingPrice: ["current selling price", "latest selling price"],
-  amount: ["total sales", "full sale value", "amount etb", "amount", "sale amount", "total amount", "total"],
+  customerLength: ["customer length", "customer length cm", "customer size length"],
+  customerWidth: ["customer width", "customer width cm", "customer size width"],
+  customerThickness: ["customer thickness", "customer thickness cm", "customer size thickness"],
+  cutLength: ["stock cut length", "stock cut length cm", "cut length", "stock length"],
+  cutWidth: ["stock cut width", "stock cut width cm", "cut width", "stock width"],
+  cutThickness: ["stock cut thickness", "stock cut thickness cm", "cut thickness", "stock thickness"],
+  quantity: ["quantity sold", "quantity of material sold", "quantity", "qty sold", "qty", "pieces wanted", "pieces"],
+  unitPrice: ["customer price", "selling price", "unit price", "price"],
+  amount: ["customer line total", "total sales", "full sale value", "amount etb", "amount", "sale amount", "total amount", "total"],
   amountReceived: ["amount received", "paid amount", "received"],
   outstandingCredit: ["outstanding credit", "credit balance", "balance due"],
   paymentType: ["payment type", "payment method", "payment"],
   bankName: ["payment destination", "bank name", "bank", "bank provider", "provider"],
   recipientAccount: ["recipient account no", "recipient account number", "account no", "account number", "recipient account"],
   notes: ["notes", "note"],
-  sourceSheet: ["source sheet", "source"],
 };
 
 const PAYMENT_TYPES = new Map([
@@ -37,9 +40,6 @@ const PAYMENT_TYPES = new Map([
   ["credit", "CREDIT"],
   ["withold", "BANK_TRANSFER"],
   ["withhold", "BANK_TRANSFER"],
-  ["payment details unknown", "LEGACY_UNKNOWN"],
-  ["legacy unknown", "LEGACY_UNKNOWN"],
-  ["unknown", "LEGACY_UNKNOWN"],
 ]);
 
 function normalizeText(value) {
@@ -80,22 +80,6 @@ function importColumns(worksheet, headerRow) {
     field,
     aliases.map((alias) => headerMap.get(normalizeText(alias))).find(Boolean),
   ]));
-}
-
-function findNamedHeaderRow(worksheet, requiredHeaders) {
-  const required = requiredHeaders.map(normalizeText);
-  for (let rowNumber = 1; rowNumber <= Math.min(worksheet.rowCount, 30); rowNumber += 1) {
-    const values = new Set();
-    worksheet.getRow(rowNumber).eachCell((cell) => values.add(normalizeText(cellText(cell))));
-    if (required.every((header) => values.has(header))) return rowNumber;
-  }
-  return null;
-}
-
-function columnsByHeader(worksheet, headerRow) {
-  const columns = new Map();
-  worksheet.getRow(headerRow).eachCell((cell, column) => columns.set(normalizeText(cellText(cell)), column));
-  return columns;
 }
 
 function parseDateCell(cell, rowNumber, errors) {
@@ -148,6 +132,32 @@ function parseOptionalMoneyCents(value, rowNumber, label, errors) {
     return null;
   }
   return BigInt(Math.round(number * 100));
+}
+
+// Reads an optional length/width/thickness trio (customer size, or the stock
+// cut size when it differs). All three must be present together or absent
+// together, matching normalizeCustomMeasurement's contract for a live sale.
+function parseOptionalSizeTrio(row, columns, lengthField, widthField, thicknessField, label, rowNumber, errors) {
+  const lengthColumn = columns[lengthField];
+  const widthColumn = columns[widthField];
+  const thicknessColumn = columns[thicknessField];
+  const rawLength = lengthColumn ? cellText(row.getCell(lengthColumn)) : "";
+  const rawWidth = widthColumn ? cellText(row.getCell(widthColumn)) : "";
+  const rawThickness = thicknessColumn ? cellText(row.getCell(thicknessColumn)) : "";
+  const filled = [rawLength, rawWidth, rawThickness].filter((value) => String(value || "").trim() !== "");
+  if (filled.length === 0) return null;
+  if (filled.length < 3) {
+    errors.push(`Row ${rowNumber}: ${label} length, width, and thickness must be filled in together, or left blank together`);
+    return null;
+  }
+  const length = positiveWholeNumber(rawLength);
+  const width = positiveWholeNumber(rawWidth);
+  const thickness = positiveWholeNumber(rawThickness);
+  if (!length || !width || !thickness) {
+    errors.push(`Row ${rowNumber}: ${label} length, width, and thickness must be positive whole numbers`);
+    return null;
+  }
+  return { length, width, thickness };
 }
 
 function measurementFromText(value) {
@@ -208,7 +218,7 @@ async function parseSalesWorkbook(buffer, products) {
       const normalized = await archive.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
       await workbook.xlsx.load(normalized);
     } catch {
-      return { rows: [], expenses: [], movements: [], errors: ["The file is not a readable .xlsx workbook"] };
+      return { rows: [], errors: ["The file is not a readable .xlsx workbook"] };
     }
   }
   const worksheet = workbook.getWorksheet("Sales Entry") || workbook.worksheets[0];
@@ -237,28 +247,16 @@ async function parseSalesWorkbook(buffer, products) {
     const quantity = Number(rawQuantity);
     if (!Number.isInteger(quantity) || quantity <= 0 || quantity > 10_000_000) errors.push(`Row ${rowNumber}: Quantity Sold must be a positive whole number`);
     const amountCents = parseMoneyCents(rawAmount, rowNumber, errors);
-    const unitPriceCents = columns.unitPrice ? parseOptionalMoneyCents(cellText(row.getCell(columns.unitPrice)), rowNumber, "Selling Price", errors) : null;
-    const currentSellingPriceCents = columns.currentSellingPrice ? parseOptionalMoneyCents(cellText(row.getCell(columns.currentSellingPrice)), rowNumber, "Current Selling Price", errors) : null;
+    const unitPriceCents = columns.unitPrice ? parseOptionalMoneyCents(cellText(row.getCell(columns.unitPrice)), rowNumber, "Customer Price", errors) : null;
     const amountReceivedCents = columns.amountReceived ? parseOptionalMoneyCents(cellText(row.getCell(columns.amountReceived)), rowNumber, "Amount Received", errors) : null;
     const outstandingCreditCents = columns.outstandingCredit ? parseOptionalMoneyCents(cellText(row.getCell(columns.outstandingCredit)), rowNumber, "Outstanding Credit", errors) : null;
-    const openingBalance = columns.openingBalance && cellText(row.getCell(columns.openingBalance)) !== "" ? Number(cellText(row.getCell(columns.openingBalance))) : null;
-    const remainingInventory = columns.remainingInventory && cellText(row.getCell(columns.remainingInventory)) !== "" ? Number(cellText(row.getCell(columns.remainingInventory))) : null;
-    if (openingBalance !== null && (!Number.isInteger(openingBalance) || openingBalance < 0)) errors.push(`Row ${rowNumber}: Beginning Balance must be zero or a positive whole number`);
-    if (remainingInventory !== null && (!Number.isInteger(remainingInventory) || remainingInventory < 0)) errors.push(`Row ${rowNumber}: Remaining Inventory must be zero or a positive whole number`);
-    const historicalRow = openingBalance !== null || remainingInventory !== null || Boolean(columns.sourceSheet && cellText(row.getCell(columns.sourceSheet)));
     const paymentMethod = PAYMENT_TYPES.get(normalizeText(rawPayment));
-    if (!paymentMethod) errors.push(`Row ${rowNumber}: Payment Type must be Bank Transfer, Credit, Cash, Mobile Money, Card, or Legacy / Unknown`);
+    if (!paymentMethod) errors.push(`Row ${rowNumber}: Payment Type must be Bank Transfer, Credit, Cash, Mobile Money, or Card`);
 
-    let bankName = columns.bankName ? String(cellText(row.getCell(columns.bankName)) || "").trim() : "";
-    let recipientAccount = columns.recipientAccount ? String(cellText(row.getCell(columns.recipientAccount)) || "").trim() : "";
-    if (paymentMethod === "BANK_TRANSFER" && !bankName) {
-      if (historicalRow) bankName = "Bank transfer";
-      else errors.push(`Row ${rowNumber}: Bank Transfer requires Bank Name`);
-    }
-    if (["BANK_TRANSFER", "MOBILE_MONEY"].includes(paymentMethod) && !recipientAccount) {
-      if (historicalRow) recipientAccount = "Account not recorded";
-      else errors.push(`Row ${rowNumber}: ${rawPayment} requires Recipient Account No.`);
-    }
+    const bankName = columns.bankName ? String(cellText(row.getCell(columns.bankName)) || "").trim() : "";
+    const recipientAccount = columns.recipientAccount ? String(cellText(row.getCell(columns.recipientAccount)) || "").trim() : "";
+    if (paymentMethod === "BANK_TRANSFER" && !bankName) errors.push(`Row ${rowNumber}: Bank Transfer requires Bank Name`);
+    if (["BANK_TRANSFER", "MOBILE_MONEY"].includes(paymentMethod) && !recipientAccount) errors.push(`Row ${rowNumber}: ${rawPayment} requires Recipient Account No.`);
     if (bankName.length > 150) errors.push(`Row ${rowNumber}: Bank Name cannot exceed 150 characters`);
     if (recipientAccount.length > 150) errors.push(`Row ${rowNumber}: Recipient Account No. cannot exceed 150 characters`);
 
@@ -275,6 +273,23 @@ async function parseSalesWorkbook(buffer, products) {
       : measurementFromText(productLookup);
     const fallbackName = String(rawProductType || String(rawProduct).replace(/\d+\s*[x×*]\s*\d+\s*[x×*]\s*\d+/i, "").replace(/[·-]+$/g, "")).trim();
     if (!resolved.product && (!fallbackMeasurement || fallbackName.length < 2)) errors.push(`Row ${rowNumber}: “${productLookup}” ${resolved.error}`);
+
+    // Customer size = what the customer ordered. Stock cut size is optional
+    // and only meaningful alongside a customer size; it records the actual
+    // piece cut from the slab when it differs from the order (defaults to
+    // the customer size when omitted), matching a live custom sale item.
+    const customerSize = parseOptionalSizeTrio(row, columns, "customerLength", "customerWidth", "customerThickness", "Customer size", rowNumber, errors);
+    const cutSize = parseOptionalSizeTrio(row, columns, "cutLength", "cutWidth", "cutThickness", "Stock cut size", rowNumber, errors);
+    if (cutSize && !customerSize) errors.push(`Row ${rowNumber}: a stock cut size needs a customer size on the same row`);
+    const customMeasurement = customerSize ? {
+      length: customerSize.length,
+      width: customerSize.width,
+      thickness: customerSize.thickness,
+      pieces: quantity,
+      cutLength: cutSize?.length || null,
+      cutWidth: cutSize?.width || null,
+      cutThickness: cutSize?.thickness || null,
+    } : null;
     if (errors.length !== rowErrorsBefore) continue;
 
     const calculatedCreditCents = amountReceivedCents === null ? (paymentMethod === "CREDIT" ? amountCents : 0n) : amountCents - amountReceivedCents;
@@ -293,86 +308,21 @@ async function parseSalesWorkbook(buffer, products) {
       productType: String(rawProductType || "").trim() || null,
       customerName: columns.customer ? String(cellText(row.getCell(columns.customer)) || "").trim().slice(0, 150) || null : null,
       quantity,
+      customMeasurement,
       amountCents,
       unitPriceCents,
-      currentSellingPriceCents,
       collectedCents,
       creditBalanceCents,
-      openingBalance,
-      remainingInventory,
-      historical: historicalRow,
       paymentMethod,
       bankName: paymentMethod === "CASH" || paymentMethod === "CREDIT" ? null : bankName || null,
       recipientAccount: paymentMethod === "CASH" || paymentMethod === "CREDIT" ? null : recipientAccount || null,
       notes: columns.notes ? String(cellText(row.getCell(columns.notes)) || "").trim().slice(0, 1000) || null : null,
-      sourceSheet: columns.sourceSheet ? String(cellText(row.getCell(columns.sourceSheet)) || "").trim().slice(0, 100) || null : null,
     });
   }
   if (worksheet.rowCount > headerRow + 2000) errors.push("The workbook exceeds the 2,000 sales row limit");
   if (!rows.length && !errors.length) errors.push("The workbook does not contain any sales rows");
 
-  const expenses = [];
-  const expenseSheet = workbook.getWorksheet("Owner Expense Account") || workbook.getWorksheet("Expense Account");
-  if (expenseSheet) {
-    const expenseHeader = findNamedHeaderRow(expenseSheet, ["Date", "Entry Type", "Amount"]);
-    if (!expenseHeader) errors.push("Owner Expense Account needs Date, Entry Type, and Amount headers");
-    else {
-      const columns = columnsByHeader(expenseSheet, expenseHeader);
-      let inheritedDate = null;
-      for (let rowNumber = expenseHeader + 1; rowNumber <= Math.min(expenseSheet.rowCount, expenseHeader + 2000); rowNumber += 1) {
-        const row = expenseSheet.getRow(rowNumber);
-        const rawType = cellText(row.getCell(columns.get("entry type")));
-        const rawAmount = cellText(row.getCell(columns.get("amount")));
-        const rawDate = cellText(row.getCell(columns.get("date")));
-        if (![rawType, rawAmount, rawDate].some((value) => String(value || "").trim())) continue;
-        if (rawDate) inheritedDate = parseDateCell(row.getCell(columns.get("date")), rowNumber, errors);
-        if (!inheritedDate) { errors.push(`Owner Expense Account row ${rowNumber}: Date is required`); continue; }
-        const normalizedType = normalizeText(rawType);
-        const entryType = ["in", "funds added", "add funds"].includes(normalizedType) ? "IN" : ["out", "spending", "spent"].includes(normalizedType) ? "OUT" : null;
-        if (!entryType) { errors.push(`Owner Expense Account row ${rowNumber}: Entry Type must be In or Out`); continue; }
-        const amountCents = parseOptionalMoneyCents(rawAmount, rowNumber, "Expense amount", errors);
-        if (amountCents === null || amountCents <= 0n) { errors.push(`Owner Expense Account row ${rowNumber}: Amount must be greater than zero`); continue; }
-        expenses.push({ rowNumber, entryType, amountCents, transactionDate: new Date(inheritedDate), note: columns.get("note") ? String(cellText(row.getCell(columns.get("note"))) || "").trim().slice(0, 1000) || null : null });
-      }
-    }
-  }
-
-  const movements = [];
-  const movementSheet = workbook.getWorksheet("Inventory History") || workbook.getWorksheet("Inventory Movements");
-  if (movementSheet) {
-    const movementHeader = findNamedHeaderRow(movementSheet, ["Date", "Material / Product", "Movement Type", "Quantity"]);
-    if (!movementHeader) errors.push("Inventory History needs Date, Material / Product, Movement Type, and Quantity headers");
-    else {
-      const columns = columnsByHeader(movementSheet, movementHeader);
-      let inheritedDate = null;
-      for (let rowNumber = movementHeader + 1; rowNumber <= Math.min(movementSheet.rowCount, movementHeader + 5000); rowNumber += 1) {
-        const row = movementSheet.getRow(rowNumber);
-        const rawProduct = cellText(row.getCell(columns.get("material product")));
-        const rawType = cellText(row.getCell(columns.get("movement type")));
-        const rawQuantity = cellText(row.getCell(columns.get("quantity")));
-        const rawDate = cellText(row.getCell(columns.get("date")));
-        if (![rawProduct, rawType, rawQuantity, rawDate].some((value) => String(value || "").trim())) continue;
-        if (rawDate) inheritedDate = parseDateCell(row.getCell(columns.get("date")), rowNumber, errors);
-        if (!inheritedDate) { errors.push(`Inventory History row ${rowNumber}: Date is required`); continue; }
-        const quantity = Number(rawQuantity);
-        if (!Number.isInteger(quantity) || quantity <= 0) { errors.push(`Inventory History row ${rowNumber}: Quantity must be a positive whole number`); continue; }
-        const type = normalizeText(rawType);
-        const movementType = type === "in" || type === "stock in" ? "STOCK_IN" : type === "out" || type === "stock out" ? "ADJUSTMENT_OUT" : null;
-        if (!movementType) { errors.push(`Inventory History row ${rowNumber}: Movement Type must be In or Out`); continue; }
-        const rawProductType = columns.get("product type") ? cellText(row.getCell(columns.get("product type"))) : "";
-        const resolved = resolveProduct(rawProduct, rawProductType, products);
-        const fallbackMeasurement = measurementFromText(rawProduct);
-        const fallbackName = String(rawProductType || String(rawProduct).replace(/\d+\s*[x×*]\s*\d+\s*[x×*]\s*\d+/i, "").replace(/[·-]+$/g, "")).trim();
-        if (!resolved.product && (!fallbackMeasurement || fallbackName.length < 2)) { errors.push(`Inventory History row ${rowNumber}: “${rawProduct}” ${resolved.error}`); continue; }
-        const rawBalance = columns.get("balance after") ? cellText(row.getCell(columns.get("balance after"))) : "";
-        const balanceAfter = rawBalance === "" ? null : Number(rawBalance);
-        if (balanceAfter !== null && (!Number.isInteger(balanceAfter) || balanceAfter < 0)) { errors.push(`Inventory History row ${rowNumber}: Balance After must be zero or a positive whole number`); continue; }
-        movements.push({ rowNumber, product: resolved.product || null, productSpec: resolved.product ? null : { name: fallbackName, ...fallbackMeasurement }, movementType, quantity, balanceAfter, transactionDate: new Date(inheritedDate), notes: columns.get("note") ? String(cellText(row.getCell(columns.get("note"))) || "").trim().slice(0, 1000) || null : null });
-      }
-    }
-  }
-
-  return { rows, expenses, movements, errors, headerRow };
+  return { rows, errors, headerRow };
 }
 
 module.exports = {

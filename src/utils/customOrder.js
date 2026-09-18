@@ -207,4 +207,5 @@ module.exports = {
   planCustomCuts,
   normalizeCustomMeasurement,
   cutSizeOf,
+  positiveWholeNumber,
 };
