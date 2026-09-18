@@ -32,7 +32,53 @@ function normalizeCustomMeasurement(value, itemNumber, errors) {
     return null;
   }
 
-  return { length, width, thickness, pieces };
+  // The cut size is what actually comes off the stock slab. It only needs to
+  // be sent when it differs from what the customer ordered (e.g. rounded up
+  // to the nearest size the slab can be cut to) -- otherwise it stays null
+  // and every caller treats it as equal to the ordered length/width/thickness.
+  const cutFieldsProvided = ["cutLength", "cutWidth", "cutThickness"].filter(
+    (field) => value[field] !== undefined && value[field] !== null && value[field] !== ""
+  );
+
+  if (cutFieldsProvided.length === 0) {
+    return { length, width, thickness, pieces, cutLength: null, cutWidth: null, cutThickness: null };
+  }
+
+  if (cutFieldsProvided.length < 3) {
+    errors.push(
+      `Sale item ${itemNumber} must provide cut length, width, and thickness together, or omit all three`
+    );
+    return null;
+  }
+
+  const cutLength = positiveWholeNumber(value.cutLength);
+  const cutWidth = positiveWholeNumber(value.cutWidth);
+  const cutThickness = positiveWholeNumber(value.cutThickness);
+
+  if (!cutLength || !cutWidth || !cutThickness) {
+    errors.push(
+      `Sale item ${itemNumber} cut length, width, and thickness must be positive whole numbers`
+    );
+    return null;
+  }
+
+  if (cutLength > 10_000 || cutWidth > 10_000 || cutThickness > 1_000) {
+    errors.push(`Sale item ${itemNumber} cut measurement is too large`);
+    return null;
+  }
+
+  return { length, width, thickness, pieces, cutLength, cutWidth, cutThickness };
+}
+
+// The physical piece that actually leaves the stock slab: the cut size when
+// the cashier recorded one (it differed from what the customer ordered),
+// otherwise the ordered size itself.
+function cutSizeOf(measurement) {
+  return {
+    length: measurement.cutLength || measurement.length,
+    width: measurement.cutWidth || measurement.width,
+    thickness: measurement.cutThickness || measurement.thickness,
+  };
 }
 
 function calculateCustomOrder(product, measurement) {
@@ -47,25 +93,27 @@ function calculateCustomOrder(product, measurement) {
     );
   }
 
-  if (measurement.thickness > stockThickness) {
+  const cutSize = cutSizeOf(measurement);
+
+  if (cutSize.thickness > stockThickness) {
     throw new HttpError(
       409,
-      `Custom thickness ${measurement.thickness} cannot be cut from ${stockThickness} thickness stock`
+      `Cut thickness ${cutSize.thickness} cannot be cut from ${stockThickness} thickness stock`
     );
   }
 
   const normalFit =
-    Math.floor(stockLength / measurement.length) *
-    Math.floor(stockWidth / measurement.width);
+    Math.floor(stockLength / cutSize.length) *
+    Math.floor(stockWidth / cutSize.width);
   const rotatedFit =
-    Math.floor(stockLength / measurement.width) *
-    Math.floor(stockWidth / measurement.length);
+    Math.floor(stockLength / cutSize.width) *
+    Math.floor(stockWidth / cutSize.length);
   const piecesPerStockUnit = Math.max(normalFit, rotatedFit);
 
   if (piecesPerStockUnit < 1) {
     throw new HttpError(
       409,
-      `The custom ${measurement.length} × ${measurement.width} measurement does not fit the selected ${stockLength} × ${stockWidth} stock`
+      `The cut ${cutSize.length} × ${cutSize.width} measurement does not fit the selected ${stockLength} × ${stockWidth} stock`
     );
   }
 
@@ -99,14 +147,15 @@ function planCustomCuts(product, selections) {
     const measurement = selection.customMeasurement || selection;
     const checked = calculateCustomOrder(product, measurement);
     piecesPerStockUnit[index] = checked.piecesPerStockUnit;
-    if (measurement.thickness > stockThickness) {
-      throw new HttpError(409, `Custom thickness ${measurement.thickness} cannot be cut from ${stockThickness} thickness stock`);
+    const cutSize = cutSizeOf(measurement);
+    if (cutSize.thickness > stockThickness) {
+      throw new HttpError(409, `Cut thickness ${cutSize.thickness} cannot be cut from ${stockThickness} thickness stock`);
     }
     if (pieces.length + measurement.pieces > 10_000) {
       throw new HttpError(400, "A shared custom-cut plan cannot exceed 10,000 pieces");
     }
     for (let piece = 0; piece < measurement.pieces; piece += 1) {
-      pieces.push({ selectionIndex: index, length: measurement.length, width: measurement.width });
+      pieces.push({ selectionIndex: index, length: cutSize.length, width: cutSize.width });
     }
   });
 
@@ -157,4 +206,5 @@ module.exports = {
   calculateCustomOrder,
   planCustomCuts,
   normalizeCustomMeasurement,
+  cutSizeOf,
 };
